@@ -1,4 +1,5 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
@@ -63,18 +64,18 @@ def get_angel_session():
     except Exception:
         return None, None
 
-def fetch_angel_candles(smart_api, token, exchange="NSE", interval="FIVE_MINUTE", days=5):
+def get_market_data(smart_api, cfg):
     try:
         to_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        from_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+        from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
         params = {
-            "exchange": exchange,
-            "symboltoken": str(token),
-            "interval": interval,
+            "exchange": cfg["exchange"],
+            "symboltoken": str(cfg["token"]),
+            "interval": "FIVE_MINUTE",
             "fromdate": from_date,
             "todate": to_date
         }
-        res = smart_api.getCandleData(params)
+        res = smart_api.getCandleData(params) if smart_api else {}
         if res.get('status') and res.get('data'):
             df = pd.DataFrame(res['data'], columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df['Timestamp'] = pd.to_datetime(df['Timestamp'])
@@ -82,18 +83,29 @@ def fetch_angel_candles(smart_api, token, exchange="NSE", interval="FIVE_MINUTE"
             return df
     except Exception:
         pass
+
+    try:
+        df_yf = yf.download(cfg["yf_symbol"], period="5d", interval="5m", progress=False)
+        if not df_yf.empty:
+            if isinstance(df_yf.columns, pd.MultiIndex):
+                df_yf.columns = df_yf.columns.get_level_values(0)
+            df_yf = df_yf[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+            for col in df_yf.columns:
+                df_yf[col] = pd.to_numeric(df_yf[col], errors='coerce')
+            return df_yf.dropna()
+    except Exception:
+        pass
     return pd.DataFrame()
 
-# --- SIDEBAR CONTROLS (NSE + BSE + MCX) ---
+# --- SIDEBAR CONTROLS ---
 st.sidebar.header("⚙️ Multi-Market Controls")
 asset_config = {
-    "NIFTY 50": {"token": "99926000", "exchange": "NSE", "step": 50, "multiplier": 75, "tsym": "Nifty 50", "cost_shift": 15.0, "trail_step": 25.0},
-    "BANK NIFTY": {"token": "99926009", "exchange": "NSE", "step": 100, "multiplier": 25, "tsym": "Nifty Bank", "cost_shift": 30.0, "trail_step": 50.0},
-    "SENSEX": {"token": "99919000", "exchange": "BSE", "step": 100, "multiplier": 20, "tsym": "SENSEX", "cost_shift": 40.0, "trail_step": 70.0},
-    "CRUDE OIL": {"token": "253460", "exchange": "MCX", "step": 50, "multiplier": 100, "tsym": "CRUDEOIL", "cost_shift": 12.0, "trail_step": 20.0},
-    "RELIANCE": {"token": "2885", "exchange": "NSE", "step": 20, "multiplier": 250, "tsym": "RELIANCE-EQ", "cost_shift": 5.0, "trail_step": 10.0},
-    "INFY": {"token": "1594", "exchange": "NSE", "step": 20, "multiplier": 400, "tsym": "INFY-EQ", "cost_shift": 4.0, "trail_step": 8.0},
-    "HDFC BANK": {"token": "1333", "exchange": "NSE", "step": 10, "multiplier": 550, "tsym": "HDFCBANK-EQ", "cost_shift": 3.0, "trail_step": 6.0}
+    "NIFTY 50": {"yf_symbol": "^NSEI", "token": "99926000", "exchange": "NSE", "step": 50, "multiplier": 75, "cost_shift": 15.0, "trail_step": 25.0},
+    "BANK NIFTY": {"yf_symbol": "^NSEBANK", "token": "99926009", "exchange": "NSE", "step": 100, "multiplier": 25, "cost_shift": 30.0, "trail_step": 50.0},
+    "SENSEX": {"yf_symbol": "^BSESN", "token": "99919000", "exchange": "BSE", "step": 100, "multiplier": 20, "cost_shift": 40.0, "trail_step": 70.0},
+    "CRUDE OIL": {"yf_symbol": "CL=F", "token": "253460", "exchange": "MCX", "step": 50, "multiplier": 100, "cost_shift": 12.0, "trail_step": 20.0},
+    "RELIANCE": {"yf_symbol": "RELIANCE.NS", "token": "2885", "exchange": "NSE", "step": 20, "multiplier": 250, "cost_shift": 5.0, "trail_step": 10.0},
+    "INFY": {"yf_symbol": "INFY.NS", "token": "1594", "exchange": "NSE", "step": 20, "multiplier": 400, "cost_shift": 4.0, "trail_step": 8.0}
 }
 
 selected_asset = st.sidebar.selectbox("Asset Chunein", list(asset_config.keys()), index=0)
@@ -119,72 +131,57 @@ if st.sidebar.button("🗑 Clear Session Logs"):
 
 smart_api_client, user_name = get_angel_session()
 
-st.title("🎯 Multi-Asset Institutional Confluence & Auto-Execution Engine")
+st.title("🎯 Multi-Asset Institutional Confluence Engine")
 
 if smart_api_client:
-    st.success(f"🔗 **Angel One Live Feed:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset} ({cfg['exchange']})** | Mode: **{trade_mode}** | Strategy: **Hybrid Confluence**")
+    st.success(f"🔗 **Angel One Connected:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset}** | Mode: **{trade_mode}**")
 else:
-    st.error("⚠️ Angel One Connection Error. Re-authorizing...")
-    st.stop()
+    st.info("ℹ️ Market Engine Syncing...")
 
-# --- CANDLE DATA FETCHING ---
-data_5m = fetch_angel_candles(smart_api_client, cfg["token"], exchange=cfg["exchange"], interval="FIVE_MINUTE", days=5)
+# --- LOAD DATA ---
+data_5m = get_market_data(smart_api_client, cfg)
 
-if not data_5m.empty and len(data_5m) > 25:
-    # 1. EMAs (9, 21, 50)
+def val(s):
+    if hasattr(s, 'values'):
+        return float(s.values[0])
+    return float(s)
+
+if not data_5m.empty and len(data_5m) > 15:
     data_5m['EMA_9'] = data_5m['Close'].ewm(span=9, adjust=False).mean()
     data_5m['EMA_21'] = data_5m['Close'].ewm(span=21, adjust=False).mean()
     data_5m['EMA_50'] = data_5m['Close'].ewm(span=50, adjust=False).mean()
 
-    # 2. Intraday VWAP Calculation
-    df_today = data_5m[data_5m.index.date == data_5m.index[-1].date()].copy()
-    if not df_today.empty and df_today['Volume'].sum() > 0:
-        typical_price = (df_today['High'] + df_today['Low'] + df_today['Close']) / 3
-        data_5m.loc[df_today.index, 'VWAP'] = (typical_price * df_today['Volume']).cumsum() / df_today['Volume'].cumsum()
-    else:
+    # Safe VWAP calculation
+    try:
+        df_today = data_5m[data_5m.index.date == data_5m.index[-1].date()].copy()
+        vol_sum = float(np.nansum(df_today['Volume'].values))
+        if not df_today.empty and vol_sum > 0:
+            tp = (df_today['High'] + df_today['Low'] + df_today['Close']) / 3
+            data_5m.loc[df_today.index, 'VWAP'] = (tp * df_today['Volume']).cumsum() / df_today['Volume'].cumsum()
+        else:
+            data_5m['VWAP'] = data_5m['EMA_21']
+    except Exception:
         data_5m['VWAP'] = data_5m['EMA_21']
 
-    # 3. RSI
     delta = data_5m['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     data_5m['RSI'] = 100 - (100 / (1 + rs))
 
-    # 4. ATR
-    hl = data_5m['High'] - data_5m['Low']
-    hc = np.abs(data_5m['High'] - data_5m['Close'].shift())
-    lc = np.abs(data_5m['Low'] - data_5m['Close'].shift())
-    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-    data_5m['ATR'] = tr.rolling(14).mean()
+    curr_c = val(data_5m['Close'].iloc[-1])
+    prev_c = val(data_5m['Close'].iloc[-2]) if len(data_5m) > 1 else curr_c
+    curr_o = val(data_5m['Open'].iloc[-1])
+    curr_h = val(data_5m['High'].iloc[-1])
+    curr_l = val(data_5m['Low'].iloc[-1])
 
-    curr_c = float(data_5m['Close'].iloc[-1])
-    prev_c = float(data_5m['Close'].iloc[-2])
-    curr_o = float(data_5m['Open'].iloc[-1])
-    curr_h = float(data_5m['High'].iloc[-1])
-    curr_l = float(data_5m['Low'].iloc[-1])
+    e9 = val(data_5m['EMA_9'].iloc[-1])
+    e21 = val(data_5m['EMA_21'].iloc[-1])
+    vwap_val = val(data_5m['VWAP'].iloc[-1]) if not np.isnan(val(data_5m['VWAP'].iloc[-1])) else e21
+    rsi = val(data_5m['RSI'].iloc[-1]) if not np.isnan(val(data_5m['RSI'].iloc[-1])) else 50.0
 
-    e9 = float(data_5m['EMA_9'].iloc[-1])
-    e21 = float(data_5m['EMA_21'].iloc[-1])
-    e50 = float(data_5m['EMA_50'].iloc[-1])
-    vwap_val = float(data_5m['VWAP'].iloc[-1]) if not np.isnan(data_5m['VWAP'].iloc[-1]) else e21
-    rsi = float(data_5m['RSI'].iloc[-1])
-    atr = float(data_5m['ATR'].iloc[-1]) if not np.isnan(data_5m['ATR'].iloc[-1]) else (curr_c * 0.003)
-
-    # Hybrid Confluence Conditions
-    bull_confluence = (
-        (curr_c >= vwap_val) and 
-        (e9 >= e21) and 
-        (curr_c >= e9 or (curr_l <= e21 and curr_c > e21)) and 
-        (48 <= rsi <= 85)
-    )
-
-    bear_confluence = (
-        (curr_c <= vwap_val) and 
-        (e9 <= e21) and 
-        (curr_c <= e9 or (curr_h >= e21 and curr_c < e21)) and 
-        (12 <= rsi <= 52)
-    )
+    bull_confluence = (curr_c >= vwap_val) and (e9 >= e21) and (curr_c >= e9 or (curr_l <= e21 and curr_c > e21)) and (48 <= rsi <= 85)
+    bear_confluence = (curr_c <= vwap_val) and (e9 <= e21) and (curr_c <= e9 or (curr_h >= e21 and curr_c < e21)) and (12 <= rsi <= 52)
 
     step = cfg["step"]
     atm_strike = round(curr_c / step) * step
@@ -204,7 +201,6 @@ if not data_5m.empty and len(data_5m) > 25:
         suggested_strike = f"{int(atm_strike + step)} PE (ITM)"
         initial_sl = curr_c + fixed_sl_pts
 
-    # Auto Entry Trigger
     if auto_trade_enabled and st.session_state.active_trade is None and action in ["BUY_CALL", "BUY_PUT"]:
         st.session_state.active_trade = {
             "Entry_Date": datetime.now().strftime("%Y-%m-%d"),
@@ -226,18 +222,17 @@ if not data_5m.empty and len(data_5m) > 25:
         }
         send_telegram_alert(
             BOT_TOKEN, CHAT_ID,
-            f"⚡ *{cfg['exchange']} HYBRID CONFLUENCE ORDER*\n\n📌 *Asset:* `{selected_asset}`\n🎯 *Action:* `{action}`\n🏷 *Strike:* `{suggested_strike}`\n💼 *Exchange:* `{cfg['exchange']}`\n💰 *Entry Spot:* ₹{curr_c:.2f}\n🛑 *Hard SL:* ₹{initial_sl:.2f} (Max Risk: ₹{max_loss_limit})\n🛡️ *Strategy:* VWAP + EMA Pullback"
+            f"⚡ *HYBRID ORDER:* `{selected_asset}` | `{action}` | `{suggested_strike}` | Spot: ₹{curr_c:.2f}"
         )
 
-    # Top Metrics Grid
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Live Spot Price", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
-    c2.metric("VWAP Floor", f"₹{vwap_val:.2f}", f"Diff: {curr_c - vwap_val:.2f}")
+    # Top Metrics Bar
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Live Spot", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
+    c2.metric("VWAP Floor", f"₹{vwap_val:.2f}")
     c3.metric("9 / 21 EMA", f"₹{e9:.1f} / ₹{e21:.1f}")
     c4.metric("RSI (14)", f"{rsi:.1f}")
-    c5.metric("Exchange Feed", f"{cfg['exchange']}")
 
-    # Active Position & Smart Trailing Engine
+    # Active Position Monitor
     st.write("### ⚡ Live Hybrid Trade Monitor")
     t = st.session_state.active_trade
     if t is not None:
@@ -252,44 +247,33 @@ if not data_5m.empty and len(data_5m) > 25:
             pts_diff = curr_c - entry
             if curr_c > t["Peak_Price"]:
                 t["Peak_Price"] = curr_c
-
             if pts_diff >= shift_target and not t["Cost_Shifted"]:
                 t["Trailing_SL"] = entry + 1.0
                 t["Cost_Shifted"] = True
-                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
-
             if pts_diff >= trail_target:
                 new_trail = curr_c - shift_target
                 if new_trail > t["Trailing_SL"]:
                     t["Trailing_SL"] = new_trail
-
             if curr_c <= t["Trailing_SL"]:
                 is_closed = True
-                exit_reason = "BREAK-EVEN COST EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
-
-        else: # BUY_PUT
+                exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
+        else:
             pts_diff = entry - curr_c
             if curr_c < t["Peak_Price"]:
                 t["Peak_Price"] = curr_c
-
             if pts_diff >= shift_target and not t["Cost_Shifted"]:
                 t["Trailing_SL"] = entry - 1.0
                 t["Cost_Shifted"] = True
-                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
-
             if pts_diff >= trail_target:
                 new_trail = curr_c + shift_target
                 if new_trail < t["Trailing_SL"]:
                     t["Trailing_SL"] = new_trail
-
             if curr_c >= t["Trailing_SL"]:
                 is_closed = True
-                exit_reason = "BREAK-EVEN COST EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
+                exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
 
-        approx_opt_pts = round(pts_diff * 0.55, 2)
-        trade_pnl = round(approx_opt_pts * qty, 2)
-
-        st.info(f"🟢 **OPEN POSITION:** `{t['Type']}` ({t['Strike']}) | Asset: **{t['Asset']} ({t.get('Exchange', 'NSE')})** | Entry: **₹{entry:.2f}** | Live Spot: **₹{curr_c:.2f}** | Move: **{pts_diff:+.2f} pts** | Trailing SL: **₹{t['Trailing_SL']:.2f}** | P&L: **₹{trade_pnl:+.2f}**")
+        trade_pnl = round(pts_diff * 0.55 * qty, 2)
+        st.info(f"🟢 **OPEN POSITION:** `{t['Type']}` ({t['Strike']}) | Spot: **₹{curr_c:.2f}** | Move: **{pts_diff:+.2f} pts** | Trailing SL: **₹{t['Trailing_SL']:.2f}** | P&L: **₹{trade_pnl:+.2f}**")
 
         if is_closed:
             completed_trade = {
@@ -303,73 +287,66 @@ if not data_5m.empty and len(data_5m) > 25:
                 "Entry_Spot": t["Entry_Spot"],
                 "Exit_Spot": curr_c,
                 "Spot_Points": round(pts_diff, 2),
-                "Opt_Points": approx_opt_pts,
+                "Opt_Points": round(pts_diff * 0.55, 2),
                 "Total_PnL_INR": trade_pnl,
                 "Exit_Reason": exit_reason,
                 "Mode": t["Mode"]
             }
             save_trade_to_csv(completed_trade)
             st.session_state.active_trade = None
-            send_telegram_alert(
-                BOT_TOKEN, CHAT_ID,
-                f"🏁 *TRADE CLOSED & SAVED*\n\n📌 *Asset:* `{t['Asset']}` ({t.get('Exchange', 'NSE')})\n🏷 *Strike:* `{t['Strike']}`\n💰 *P&L:* ₹{trade_pnl:+.2f} ({pts_diff:+.2f} pts)\n🚪 *Reason:* `{exit_reason}`"
-            )
             st.rerun()
     else:
-        st.caption(f"⚡ हाइब्रिड इंजन {selected_asset} ({cfg['exchange']}) के VWAP, 9/21 EMA और लिक्विडिटी को मॉनिटर कर रहा है।")
+        st.caption(f"⚡ इंजन {selected_asset} ({cfg['exchange']}) के VWAP, 9/21 EMA को मॉनिटर कर रहा है।")
 
-    # --- PERMANENT PERFORMANCE JOURNAL (CSV) ---
-    st.write("---")
-    st.write("### 📚 Permanent Trade Book & Performance History")
-    df_history = load_trade_history()
-
-    if not df_history.empty:
-        col_j1, col_j2, col_j3 = st.columns(3)
-        total_pnl_all = df_history['Total_PnL_INR'].sum()
-        total_trades = len(df_history)
-        winning_trades = len(df_history[df_history['Total_PnL_INR'] > 0])
-        win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
-
-        col_j1.metric("Cumulative Net P&L", f"₹{total_pnl_all:+.2f}", delta=f"{total_pnl_all:.2f}")
-        col_j2.metric("Total Trades", f"{total_trades}")
-        col_j3.metric("Win Rate", f"{win_rate:.1f}%", f"{winning_trades} Wins")
-
-        st.dataframe(df_history, use_container_width=True)
-
-        csv_data = df_history.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Complete Trade History (CSV)",
-            data=csv_data,
-            file_name=f"trade_book_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-        )
-    else:
-        st.info("ℹ️ पहला ट्रेड क्लोज होते ही पूरा रिकॉर्ड यहाँ परमानेंट दिखने लगेगा।")
-
-    # Interactive Candlestick Chart
-    st.write("### 📈 Live Candlestick Chart (VWAP & EMA Multi-Overlay)")
+    # Chart Section
+    st.write("### 📈 Live Candlestick Chart")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
         x=data_5m.index,
-        open=data_5m['Open'], high=data_5m['High'],
-        low=data_5m['Low'], close=data_5m['Close'],
+        open=data_5m['Open'].values.flatten() if hasattr(data_5m['Open'], 'values') else data_5m['Open'],
+        high=data_5m['High'].values.flatten() if hasattr(data_5m['High'], 'values') else data_5m['High'],
+        low=data_5m['Low'].values.flatten() if hasattr(data_5m['Low'], 'values') else data_5m['Low'],
+        close=data_5m['Close'].values.flatten() if hasattr(data_5m['Close'], 'values') else data_5m['Close'],
         name="Price"
     ), row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['VWAP'], line=dict(color='yellow', width=2), name="VWAP"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_9'], line=dict(color='lime', width=1.5), name="9 EMA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_21'], line=dict(color='orange', width=1.5), name="21 EMA"), row=1, col=1)
-
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['RSI'], line=dict(color='magenta', width=1.5), name="RSI (14)"), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-
-    fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['VWAP'].values.flatten() if hasattr(data_5m['VWAP'], 'values') else data_5m['VWAP'], line=dict(color='yellow', width=2), name="VWAP"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_9'].values.flatten() if hasattr(data_5m['EMA_9'], 'values') else data_5m['EMA_9'], line=dict(color='lime', width=1.5), name="9 EMA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_21'].values.flatten() if hasattr(data_5m['EMA_21'], 'values') else data_5m['EMA_21'], line=dict(color='orange', width=1.5), name="21 EMA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['RSI'].values.flatten() if hasattr(data_5m['RSI'], 'values') else data_5m['RSI'], line=dict(color='magenta', width=1.5), name="RSI"), row=2, col=1)
+    fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=20, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
-    if auto_refresh:
-        time.sleep(refresh_interval)
-        st.rerun()
-
 else:
-    st.error(f"Angel One से {selected_asset} का डेटा लोड हो रहा है... कृपया 3 सेकंड प्रतीक्षा करें।")
+    st.warning(f"ℹ️ {selected_asset} का डेटा लोड हो रहा है...")
+
+# --- PERMANENT TRADE JOURNAL ---
+st.write("---")
+st.write("### 📚 Permanent Trade Book & Performance History")
+df_history = load_trade_history()
+
+if not df_history.empty:
+    col_j1, col_j2, col_j3 = st.columns(3)
+    total_pnl_all = df_history['Total_PnL_INR'].sum()
+    total_trades = len(df_history)
+    winning_trades = len(df_history[df_history['Total_PnL_INR'] > 0])
+    win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
+
+    col_j1.metric("Cumulative Net P&L", f"₹{total_pnl_all:+.2f}", delta=f"{total_pnl_all:.2f}")
+    col_j2.metric("Total Executed Trades", f"{total_trades}")
+    col_j3.metric("Win Rate", f"{win_rate:.1f}%", f"{winning_trades} Wins")
+
+    st.dataframe(df_history, use_container_width=True)
+
+    csv_data = df_history.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Complete Trade History (CSV)",
+        data=csv_data,
+        file_name=f"trade_book_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
+else:
+    st.info("📝 **ट्रेड जर्नल सक्रिय है:** पहला ट्रेड क्लोज़ होते ही पूरी हिस्ट्री और CSV डाउनलोड बटन यहाँ दिखने लगेगा।")
+
+if auto_refresh:
+    time.sleep(refresh_interval)
+    st.rerun()
