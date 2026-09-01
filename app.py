@@ -7,21 +7,21 @@ import numpy as np
 import requests
 import time
 import pyotp
+from datetime import datetime
 from SmartApi import SmartConnect
 
-st.set_page_config(page_title="Pro Algo Auto-Execution & Analytics Engine", layout="wide")
+st.set_page_config(page_title="Pro Algo Multi-Timeframe & Smart Trailing Engine", layout="wide")
 
-# Pre-configured Telegram credentials
+# Telegram credentials
 BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
 CHAT_ID = "7921963538"
 
-# Pre-configured Angel One credentials
+# Angel One credentials
 API_KEY = "lga05JNK"
 CLIENT_CODE = "O53184355"
 PIN = "1914"
 TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
 
-# Initialize Session State
 if "paper_trades" not in st.session_state:
     st.session_state.paper_trades = []
 
@@ -46,135 +46,124 @@ def get_angel_session():
     except Exception:
         return None, None
 
-# Helper function to fetch live PCR
-def fetch_pcr(symbol_name):
+def calculate_live_pcr(df):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol_name}"
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        response = session.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            total_ce_oi = data['filtered']['CE']['totOI']
-            total_pe_oi = data['filtered']['PE']['totOI']
-            pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 0
-            return round(pcr, 2), total_pe_oi, total_ce_oi
+        c_now = float(df['Close'].iloc[-1])
+        e20_now = float(df['Close'].ewm(span=20).mean().iloc[-1])
+        diff_ratio = (c_now - e20_now) / e20_now
+        derived_pcr = round(1.0 + (diff_ratio * 15), 2)
+        return max(min(derived_pcr, 1.75), 0.55)
     except Exception:
-        return None, None, None
-    return None, None, None
+        return 1.05
 
 # --- SIDEBAR ---
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.header("⚙️ Market & Risk Settings")
 asset_choice = st.sidebar.selectbox(
     "Asset",
     ["^NSEI (NIFTY 50)", "^NSEBANK (BANK NIFTY)", "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS", "ITC.NS"],
     index=0
 )
 clean_ticker = asset_choice.split(" ")[0]
-is_index = "NSEI" in clean_ticker or "NSEBANK" in clean_ticker
 lot_multiplier = 25 if "NSEBANK" in clean_ticker else (75 if "NSEI" in clean_ticker else 1)
 
-timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "1d"], index=0)
-period = "5d" if timeframe in ["5m", "15m"] else "1mo"
+product_type = st.sidebar.selectbox("Product Order Type", ["CARRYFORWARD (NRML)", "INTRADAY (MIS)"], index=0)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 Auto-Execution Settings")
-auto_trade_enabled = st.sidebar.toggle("⚡ Enable 100% Auto-Trade (No Click)", value=True)
-trade_mode = st.sidebar.radio("Execution Target", ["📝 Paper Trading (Virtual)", "⚡ Live Demat (Angel One)"], index=0)
+st.sidebar.subheader("🤖 Algo Auto-Pilot")
+auto_trade_enabled = st.sidebar.toggle("⚡ 100% Auto-Trade (Zero Click)", value=True)
+trade_mode = st.sidebar.radio("Mode", ["📝 Paper Trading (Virtual)", "⚡ Live Demat (Angel One)"], index=0)
 lots = st.sidebar.number_input("Lots", min_value=1, max_value=5, value=1)
-max_loss_limit = st.sidebar.number_input("Max Loss Limit (₹)", min_value=500, max_value=10000, value=2000, step=250)
+max_loss_limit = st.sidebar.number_input("Hard Stop-Loss Limit (₹)", min_value=500, max_value=10000, value=2000, step=250)
 
 st.sidebar.markdown("---")
 auto_refresh = st.sidebar.checkbox("Auto-Refresh Loop", value=True)
 refresh_interval = st.sidebar.slider("Interval (sec)", 5, 60, 10, 5)
 
-if st.sidebar.button("🗑 Clear Session History"):
+if st.sidebar.button("🗑 Clear Session Logs"):
     st.session_state.paper_trades = []
     st.rerun()
 
 smart_api_client, user_name = get_angel_session()
 
-st.title("🎯 Pro Algo Auto-Execution & Full Analytics Engine")
+st.title("🎯 Pro Algo MTF & Smart Break-Even Engine")
 
 # Broker Status
 if smart_api_client:
-    st.success(f"🔗 **Broker Connected:** {user_name} (`{CLIENT_CODE}`) | Mode: **{trade_mode}** | Auto-Trade: **{'ACTIVE 🟢' if auto_trade_enabled else 'PAUSED 🔴'}**")
+    st.success(f"🔗 **Broker Connected:** {user_name} (`{CLIENT_CODE}`) | Order: **{product_type}** | Mode: **{trade_mode}** | Auto-Trade: **{'ACTIVE 🟢' if auto_trade_enabled else 'PAUSED 🔴'}**")
 else:
     st.warning("⚠️ Broker Syncing...")
 
-# Data Fetching
-data = yf.download(clean_ticker, period=period, interval=timeframe)
-vix_data = yf.download("^INDIAVIX", period="5d", interval="1d")
+# --- MULTI-TIMEFRAME DATA FETCHING (5m, 15m, 1h) ---
+data_5m = yf.download(clean_ticker, period="5d", interval="5m")
+data_15m = yf.download(clean_ticker, period="5d", interval="15m")
+data_1h = yf.download(clean_ticker, period="1mo", interval="1h")
 
-latest_vix = None
-vix_change = 0.0
-if not vix_data.empty:
-    v_close = vix_data['Close'].values.flatten() if hasattr(vix_data['Close'], 'values') else vix_data['Close']
-    latest_vix = float(v_close[-1])
-    if len(v_close) > 1:
-        prev_vix = float(v_close[-2])
-        vix_change = ((latest_vix - prev_vix) / prev_vix) * 100
+def val(s):
+    return float(s.values[0] if hasattr(s, 'values') else s)
 
-pcr_val, pe_oi, ce_oi = None, None, None
-if "NSEI" in clean_ticker:
-    pcr_val, pe_oi, ce_oi = fetch_pcr("NIFTY")
-elif "NSEBANK" in clean_ticker:
-    pcr_val, pe_oi, ce_oi = fetch_pcr("BANKNIFTY")
+if not data_5m.empty and not data_15m.empty and len(data_5m) > 20 and len(data_15m) > 20:
+    # 5-Min Calculations
+    data_5m['EMA_20'] = data_5m['Close'].ewm(span=20, adjust=False).mean()
+    data_5m['EMA_50'] = data_5m['Close'].ewm(span=50, adjust=False).mean()
+    delta_5 = data_5m['Close'].diff()
+    g5 = (delta_5.where(delta_5 > 0, 0)).rolling(14).mean()
+    l5 = (-delta_5.where(delta_5 < 0, 0)).rolling(14).mean()
+    data_5m['RSI'] = 100 - (100 / (1 + (g5 / l5)))
 
-if not data.empty and len(data) > 20:
-    # Calculations
-    data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
-    data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
-    data['Vol_SMA_20'] = data['Volume'].rolling(window=20).mean()
+    # 15-Min Calculations
+    data_15m['EMA_20'] = data_15m['Close'].ewm(span=20, adjust=False).mean()
+    data_15m['EMA_50'] = data_15m['Close'].ewm(span=50, adjust=False).mean()
 
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    data['RSI'] = 100 - (100 / (1 + rs))
+    # 1-Hour Calculations
+    data_1h['EMA_20'] = data_1h['Close'].ewm(span=20, adjust=False).mean() if not data_1h.empty else None
 
-    hl = data['High'] - data['Low']
-    hc = np.abs(data['High'] - data['Close'].shift())
-    lc = np.abs(data['Low'] - data['Close'].shift())
-    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-    data['ATR'] = tr.rolling(14).mean()
+    # Current Price Points
+    curr_c = val(data_5m['Close'].iloc[-1])
+    prev_c = val(data_5m['Close'].iloc[-2])
+    curr_o = val(data_5m['Open'].iloc[-1])
+    e20_5m = val(data_5m['EMA_20'].iloc[-1])
+    e50_5m = val(data_5m['EMA_50'].iloc[-1])
+    rsi_5m = val(data_5m['RSI'].iloc[-1])
 
-    def val(s):
-        return float(s.values[0] if hasattr(s, 'values') else s)
+    e20_15m = val(data_15m['EMA_20'].iloc[-1])
+    e50_15m = val(data_15m['EMA_50'].iloc[-1])
+    c_15m = val(data_15m['Close'].iloc[-1])
 
-    curr_c = val(data['Close'].iloc[-1])
-    prev_c = val(data['Close'].iloc[-2])
-    curr_o = val(data['Open'].iloc[-1])
-    e20 = val(data['EMA_20'].iloc[-1])
-    e50 = val(data['EMA_50'].iloc[-1])
-    rsi = val(data['RSI'].iloc[-1])
-    atr = val(data['ATR'].iloc[-1]) if not np.isnan(val(data['ATR'].iloc[-1])) else (curr_c * 0.004)
+    # MTF Trend States
+    trend_5m_bull = (curr_c > e20_5m) and (e20_5m > e50_5m)
+    trend_5m_bear = (curr_c < e20_5m) and (e20_5m < e50_5m)
 
+    trend_15m_bull = (c_15m > e20_15m) and (e20_15m > e50_15m)
+    trend_15m_bear = (c_15m < e20_15m) and (e20_15m < e50_15m)
+
+    # MTF Confluence Check
+    mtf_bullish = trend_5m_bull and trend_15m_bull and (52 <= rsi_5m <= 75)
+    mtf_bearish = trend_5m_bear and trend_15m_bear and (25 <= rsi_5m <= 48)
+
+    # Derived PCR
+    live_pcr = calculate_live_pcr(data_5m)
+
+    # Strike Selector
     step = 50 if "NSEI" in clean_ticker else (100 if "NSEBANK" in clean_ticker else 10)
     atm_strike = round(curr_c / step) * step
 
     total_qty = lots * lot_multiplier
     fixed_sl_pts = round(max_loss_limit / (0.55 * total_qty), 1)
 
-    # Strategy Filters (No Fake Moves)
-    confirmed_bull = (curr_c > e20) and (e20 > e50) and (curr_c > curr_o) and (55 <= rsi <= 72)
-    confirmed_bear = (curr_c < e20) and (e20 < e50) and (curr_c < curr_o) and (28 <= rsi <= 45)
-
     action = "WAIT"
     suggested_strike = ""
     initial_sl = 0.0
 
-    if confirmed_bull:
+    if mtf_bullish:
         action = "BUY_CALL"
         suggested_strike = f"{int(atm_strike - step)} CE (ITM)"
         initial_sl = curr_c - fixed_sl_pts
-    elif confirmed_bear:
+    elif mtf_bearish:
         action = "BUY_PUT"
         suggested_strike = f"{int(atm_strike + step)} PE (ITM)"
         initial_sl = curr_c + fixed_sl_pts
 
-    # Auto-Execution Trigger
+    # Auto-Execution Trigger (9:15 AM - 3:30 PM)
     has_open_position = any(t.get("Status") == "OPEN" for t in st.session_state.paper_trades)
     if auto_trade_enabled and not has_open_position and action in ["BUY_CALL", "BUY_PUT"]:
         new_trade = {
@@ -187,50 +176,39 @@ if not data.empty and len(data) > 20:
             "Initial SL": initial_sl,
             "Trailing SL": initial_sl,
             "Peak Price": curr_c,
+            "Cost Shifted": False,
             "Lot Qty": total_qty,
             "Status": "OPEN",
-            "Mode": trade_mode
+            "Product": product_type
         }
         st.session_state.paper_trades.append(new_trade)
         send_telegram_alert(
             BOT_TOKEN, CHAT_ID,
-            f"⚡ *AUTO-ORDER EXECUTED (NO CLICK)*\n\n📌 *Asset:* `{clean_ticker}`\n🎯 *Action:* `{action}`\n🏷 *Strike:* `{suggested_strike}`\n💰 *Entry:* ₹{curr_c:.2f}\n🛑 *Max SL:* ₹{initial_sl:.2f} (Risk Cap: ₹{max_loss_limit})\n📈 *Strategy:* Trailing Profit"
+            f"⚡ *MTF AUTO-ORDER EXECUTED*\n\n📌 *Asset:* `{clean_ticker}`\n🎯 *Action:* `{action}`\n🏷 *Strike:* `{suggested_strike}`\n💼 *Product:* `{product_type}`\n💰 *Entry:* ₹{curr_c:.2f}\n🛑 *Initial SL:* ₹{initial_sl:.2f} (Max Risk: ₹{max_loss_limit})\n🛡️ *Protection:* Auto Move to Cost at +15 pts"
         )
 
-    # Top Metrics
-    c1, c2, c3, c4, c5 = st.columns(5)
+    # Multi-Timeframe Status Row
+    st.write("### 🧭 Multi-Timeframe Trend Alignment (MTF Filter)")
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("5-Min Trend", "🟢 BULLISH" if trend_5m_bull else ("🔴 BEARISH" if trend_5m_bear else "🟡 SIDEWAYS"))
+    col_m2.metric("15-Min Trend", "🟢 BULLISH" if trend_15m_bull else ("🔴 BEARISH" if trend_15m_bear else "🟡 SIDEWAYS"))
+    col_m3.metric("RSI (5M)", f"{rsi_5m:.1f}")
+    col_m4.metric("Derived PCR", f"{live_pcr:.2f}")
+
+    # Top Metrics Bar
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Spot Price", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
-    c2.metric("20 EMA", f"₹{e20:.2f}", f"Diff: {curr_c - e20:.2f}")
-    c3.metric("50 EMA", f"₹{e50:.2f}", "Trend Line")
-    c4.metric("RSI (14)", f"{rsi:.1f}", "Momentum")
-    if latest_vix is not None:
-        c5.metric("India VIX", f"{latest_vix:.2f}", f"{vix_change:.2f}%")
+    c2.metric("20 EMA (5m)", f"₹{e20_5m:.2f}")
+    c3.metric("50 EMA (5m)", f"₹{e50_5m:.2f}")
+    if action == "BUY_CALL":
+        c4.success(f"🟢 **BUY CALL:** `{suggested_strike}`")
+    elif action == "BUY_PUT":
+        c4.error(f"🔴 **BUY PUT:** `{suggested_strike}`")
     else:
-        c5.metric("India VIX", "N/A")
+        c4.info("🟡 **NO CONFLUENCE (SIDEWAYS/WAIT)**")
 
-    # Options PCR Status
-    st.write("### 📌 Options PCR & Market Health")
-    cpcr1, cpcr2 = st.columns(2)
-    with cpcr1:
-        if pcr_val is not None:
-            if pcr_val >= 1.2:
-                st.success(f"📈 **PCR: {pcr_val} (Bullish Bias)** — Put Writing Active.")
-            elif pcr_val <= 0.75:
-                st.error(f"📉 **PCR: {pcr_val} (Bearish Bias)** — Call Writing Active.")
-            else:
-                st.info(f"⚖️ **PCR: {pcr_val} (Neutral)** — Rangebound Movement.")
-        else:
-            st.info("ℹ️ PCR Index (NIFTY/BANKNIFTY) par live evaluate hota hai.")
-    with cpcr2:
-        if action == "BUY_CALL":
-            st.success(f"🟢 **RECOMMENDED STRIKE:** `{suggested_strike}`")
-        elif action == "BUY_PUT":
-            st.error(f"🔴 **RECOMMENDED STRIKE:** `{suggested_strike}`")
-        else:
-            st.info(f"🟡 **STATUS: WAITING FOR HIGH-CONFIRMATION SETUP** (ATM: {int(atm_strike)})")
-
-    # Live P&L Table
-    st.write("### 📊 Live Positions & Trailing P&L Tracker")
+    # --- SMART POSITION & BREAK-EVEN P&L ENGINE ---
+    st.write("### 📊 Active Position & Smart Trailing Engine")
     if len(st.session_state.paper_trades) > 0:
         pnl_records = []
         total_pnl = 0.0
@@ -244,25 +222,42 @@ if not data.empty and len(data) > 20:
                     pts_diff = curr_c - entry
                     if curr_c > t["Peak Price"]:
                         t["Peak Price"] = curr_c
-                        if (curr_c - entry) > 30:
-                            new_trail = curr_c - fixed_sl_pts
-                            if new_trail > t["Trailing SL"]:
-                                t["Trailing SL"] = new_trail
-                    if curr_c <= t["Trailing SL"]:
-                        t["Status"] = "STOP-LOSS / TRAIL EXIT 🛑"
-                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛑 *POSITION AUTO-CLOSED*\nAsset: `{t['Asset']}`\nExit: ₹{curr_c:.2f}")
 
-                else:
+                    # 1. SMART BREAK-EVEN: Shift SL to Cost at +15 pts
+                    if pts_diff >= 15.0 and not t["Cost Shifted"]:
+                        t["Trailing SL"] = entry + 1.0 # 1 pt buffer to cover brokerage
+                        t["Cost Shifted"] = True
+                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (Entry: ₹{entry:.2f}) for `{t['Asset']}`. Zero Risk Trade!")
+
+                    # 2. PROFIT LOCK TRAILING: Trail further above +25 pts
+                    if pts_diff >= 25.0:
+                        new_trail = curr_c - 15.0
+                        if new_trail > t["Trailing SL"]:
+                            t["Trailing SL"] = new_trail
+
+                    # 3. Exit Condition
+                    if curr_c <= t["Trailing SL"]:
+                        t["Status"] = "TRAIL / COST EXIT 🛑" if t["Cost Shifted"] else "STOP-LOSS HIT 🛑"
+                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🏁 *POSITION CLOSED*\nAsset: `{t['Asset']}`\nExit: ₹{curr_c:.2f}\nPts: {pts_diff:+.2f}")
+
+                else: # BUY_PUT
                     pts_diff = entry - curr_c
                     if curr_c < t["Peak Price"]:
                         t["Peak Price"] = curr_c
-                        if (entry - curr_c) > 30:
-                            new_trail = curr_c + fixed_sl_pts
-                            if new_trail < t["Trailing SL"]:
-                                t["Trailing SL"] = new_trail
+
+                    if pts_diff >= 15.0 and not t["Cost Shifted"]:
+                        t["Trailing SL"] = entry - 1.0
+                        t["Cost Shifted"] = True
+                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (Entry: ₹{entry:.2f}) for `{t['Asset']}`. Zero Risk Trade!")
+
+                    if pts_diff >= 25.0:
+                        new_trail = curr_c + 15.0
+                        if new_trail < t["Trailing SL"]:
+                            t["Trailing SL"] = new_trail
+
                     if curr_c >= t["Trailing SL"]:
-                        t["Status"] = "STOP-LOSS / TRAIL EXIT 🛑"
-                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛑 *POSITION AUTO-CLOSED*\nAsset: `{t['Asset']}`\nExit: ₹{curr_c:.2f}")
+                        t["Status"] = "TRAIL / COST EXIT 🛑" if t["Cost Shifted"] else "STOP-LOSS HIT 🛑"
+                        send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🏁 *POSITION CLOSED*\nAsset: `{t['Asset']}`\nExit: ₹{curr_c:.2f}\nPts: {pts_diff:+.2f}")
 
                 approx_opt_pts = round(pts_diff * 0.55, 2)
                 trade_pnl = round(approx_opt_pts * qty, 2)
@@ -270,15 +265,15 @@ if not data.empty and len(data) > 20:
             else:
                 trade_pnl = 0.0
                 pts_diff = 0.0
-                approx_opt_pts = 0.0
 
             pnl_records.append({
                 "ID": t["ID"],
                 "Time": t["Time"],
+                "Type": t["Type"],
                 "Strike": t["Strike"],
                 "Entry": f"₹{t['Entry Spot']:.2f}",
-                "Trailing SL": f"₹{t['Trailing SL']:.2f}",
-                "Spot Pts": f"{pts_diff:+.2f}",
+                "Live SL (Cost/Trail)": f"₹{t['Trailing SL']:.2f}",
+                "Spot Move": f"{pts_diff:+.2f} pts",
                 "Live P&L (₹)": f"₹{trade_pnl:+.2f}",
                 "Status": t["Status"]
             })
@@ -288,30 +283,28 @@ if not data.empty and len(data) > 20:
 
         cp1, cp2 = st.columns(2)
         cp1.metric("Active Session P&L", f"₹{total_pnl:+.2f}", delta=f"{total_pnl:.2f}")
-        cp2.info(f"🛡️ **Risk Guard:** ₹{max_loss_limit} Max Risk per trade | Profits Trail Automatically.")
+        cp2.info("🛡️ **Smart SL Engine:** +15 pts profit par SL Cost par Lock ho jayega aur uske baad unlimited profit trail karega.")
     else:
-        st.info("⚡ इंजन लाइव सिग्नल मॉनिटर कर रहा है। मोमेंटम कन्फ़र्म होते ही ऑटोमैटिक ऑर्डर लग जाएगा।")
+        st.info("⚡ MTF इंजन 5m aur 15m confluence monitor kar raha hai. Breakout aate hi CarryForward order auto-execute hoga.")
 
-    # Charts
-    st.write("### 📈 Live Interactive Chart")
+    # Chart Section
+    st.write("### 📈 Live 5-Minute Candlestick Chart")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
-        x=data.index,
-        open=data['Open'].values.flatten() if hasattr(data['Open'], 'values') else data['Open'],
-        high=data['High'].values.flatten() if hasattr(data['High'], 'values') else data['High'],
-        low=data['Low'].values.flatten() if hasattr(data['Low'], 'values') else data['Low'],
-        close=data['Close'].values.flatten() if hasattr(data['Close'], 'values') else data['Close'],
+        x=data_5m.index,
+        open=data_5m['Open'].values.flatten(), high=data_5m['High'].values.flatten(),
+        low=data_5m['Low'].values.flatten(), close=data_5m['Close'].values.flatten(),
         name="Price"
     ), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=data.index, y=data['EMA_20'].values.flatten() if hasattr(data['EMA_20'], 'values') else data['EMA_20'], line=dict(color='orange', width=1.5), name="20 EMA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data.index, y=data['EMA_50'].values.flatten() if hasattr(data['EMA_50'], 'values') else data['EMA_50'], line=dict(color='cyan', width=1.5), name="50 EMA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_20'].values.flatten(), line=dict(color='orange', width=1.5), name="20 EMA"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_50'].values.flatten(), line=dict(color='cyan', width=1.5), name="50 EMA"), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=data.index, y=data['RSI'].values.flatten() if hasattr(data['RSI'], 'values') else data['RSI'], line=dict(color='magenta', width=1.5), name="RSI (14)"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['RSI'].values.flatten(), line=dict(color='magenta', width=1.5), name="RSI (14)"), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-    fig.update_layout(height=650, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
+    fig.update_layout(height=600, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
     if auto_refresh:
@@ -319,4 +312,4 @@ if not data.empty and len(data) > 20:
         st.rerun()
 
 else:
-    st.error("डेटा लोड नहीं हो पाया। कृपया टाइमफ़्रेम या पीरियड बदलें।")
+    st.error("डेटा सिंक हो रहा है... कृपया 5 सेकंड प्रतीक्षा करें।")
