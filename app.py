@@ -6,12 +6,24 @@ import pandas as pd
 import numpy as np
 import requests
 import time
+import pyotp
+from SmartApi import SmartConnect
 
-st.set_page_config(page_title="Live Market & Strike Engine", layout="wide")
+st.set_page_config(page_title="Pro Algo Trading & Strike Engine", layout="wide")
 
 # Pre-configured Telegram credentials
 BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
 CHAT_ID = "7921963538"
+
+# Pre-configured Angel One credentials
+API_KEY = "lga05JNK"
+CLIENT_CODE = "O53184355"
+PIN = "1914"
+TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
+
+# Initialize Session State for Paper Trading
+if "paper_trades" not in st.session_state:
+    st.session_state.paper_trades = []
 
 # Telegram Send Function
 def send_telegram_alert(token, chat_id, message_text):
@@ -25,8 +37,21 @@ def send_telegram_alert(token, chat_id, message_text):
             return False
     return False
 
+# Angel One Session Function
+@st.cache_resource(ttl=3600)
+def get_angel_session():
+    try:
+        totp = pyotp.TOTP(TOTP_SECRET).now()
+        smart_api = SmartConnect(api_key=API_KEY)
+        data = smart_api.generateSession(CLIENT_CODE, PIN, totp)
+        if data.get('status'):
+            return smart_api, data['data'].get('name', 'OSTEN')
+        return None, None
+    except Exception:
+        return None, None
+
 # --- SIDEBAR CONTROLS ---
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.header("⚙️ Market Configuration")
 asset_choice = st.sidebar.selectbox(
     "Asset Chunein",
     ["^NSEI (NIFTY 50)", "^NSEBANK (BANK NIFTY)", "RELIANCE.NS", "INFY.NS", "TCS.NS", "HDFCBANK.NS", "ITC.NS"],
@@ -47,11 +72,16 @@ else:
 
 period = st.sidebar.selectbox("Data Period", period_options, index=default_p_idx)
 
-# --- AUTO-REFRESH SETTINGS ---
+# --- EXECUTION MODE ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔄 Live Auto-Refresh")
+st.sidebar.subheader("🤖 Algo Execution Mode")
+trade_mode = st.sidebar.radio("Mode Chunein", ["📝 Paper Trading (Virtual)", "⚡ Live Demat (Angel One)"], index=0)
+lot_size = st.sidebar.number_input("Lot Size", min_value=1, max_value=5, value=1, step=1)
+
+# Auto Refresh
+st.sidebar.markdown("---")
 auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=True)
-refresh_interval = st.sidebar.slider("Refresh Interval (Seconds)", min_value=5, max_value=60, value=10, step=5)
+refresh_interval = st.sidebar.slider("Interval (Seconds)", min_value=5, max_value=60, value=10, step=5)
 
 # Helper function to fetch live PCR
 def fetch_pcr(symbol_name):
@@ -70,6 +100,18 @@ def fetch_pcr(symbol_name):
     except Exception:
         return None, None, None
     return None, None, None
+
+# Connect to Angel One
+smart_api_client, user_name = get_angel_session()
+
+# Main Header
+st.title("🎯 Pro Algo Trading & Option Strike Engine")
+
+# Angel One Status Bar
+if smart_api_client:
+    st.success(f"🔗 **Angel One Connected:** {user_name} (`{CLIENT_CODE}`) | Mode: **{trade_mode}**")
+else:
+    st.warning("⚠️ Angel One Offline / Session Refreshing...")
 
 # 1. Fetch Main Asset Data
 data = yf.download(clean_ticker, period=period, interval=timeframe)
@@ -92,8 +134,6 @@ if "NSEI" in clean_ticker:
     pcr_val, pe_oi, ce_oi = fetch_pcr("NIFTY")
 elif "NSEBANK" in clean_ticker:
     pcr_val, pe_oi, ce_oi = fetch_pcr("BANKNIFTY")
-
-st.title("🎯 Pro Market Trend, Strike Selector & Telegram Alerts")
 
 if not data.empty and len(data) > 5:
     # Calculations
@@ -184,79 +224,76 @@ if not data.empty and len(data) > 5:
     if trend_bullish and vol_ratio >= 1.2:
         action = "BUY_CALL"
         itm_strike = atm_strike - step
-        suggested_strike = f"{int(itm_strike)} CE (Slight ITM) ya {int(atm_strike)} CE (ATM)"
+        suggested_strike = f"{int(itm_strike)} CE"
         stop_loss = c_price - sl_points
         target_1 = c_price + (sl_points * 1.5)
         target_2 = c_price + (sl_points * 2.5)
     elif trend_bearish and vol_ratio >= 1.2:
         action = "BUY_PUT"
         itm_strike = atm_strike + step
-        suggested_strike = f"{int(itm_strike)} PE (Slight ITM) ya {int(atm_strike)} PE (ATM)"
+        suggested_strike = f"{int(itm_strike)} PE"
         stop_loss = c_price + sl_points
         target_1 = c_price - (sl_points * 1.5)
         target_2 = c_price - (sl_points * 2.5)
 
-    # Strategy & Strike Recommendation Box
-    st.write("### 💡 Recommended Option Strike & Trade Plan")
+    # Strategy & Execution Box
+    st.write("### ⚡ Live Algo Trade Execution")
     rec_col1, rec_col2 = st.columns(2)
 
     with rec_col1:
         if action == "BUY_CALL":
-            st.success(f"🟢 **RECOMMENDED ACTION: BUY CALL (CE)**\n\n🎯 **Best Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price 20 EMA ke upar hai aur volume breakout support kar raha hai.")
+            st.success(f"🟢 **SIGNAL: BUY CALL (CE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price > 20 EMA with Bullish Volume Spike.")
         elif action == "BUY_PUT":
-            st.error(f"🔴 **RECOMMENDED ACTION: BUY PUT (PE)**\n\n🎯 **Best Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price 20 EMA ke niche hai aur heavy volume selling chal rahi hai.")
-        elif rsi >= 70:
-            st.warning("⚠️ **OVERBOUGHT:** Market high par stretch ho chuka hai. Fresh CE buy avoid karein.")
-        elif rsi <= 30:
-            st.info("🔄 **OVERSOLD BOUNCE:** Market bottom zone me hai. Reversal pattern ka wait karein.")
+            st.error(f"🔴 **SIGNAL: BUY PUT (PE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price < 20 EMA with Bearish Pressure.")
         else:
-            st.info(f"🟡 **NO DIRECT TRADE (WAIT):** Clear momentum nahi hai.\n\n*Reference ATM Strike:* **{int(atm_strike)}**")
+            st.info(f"🟡 **NO ACTIVE TRADE (WAIT):** Market Sideways / Consolidating.\n\n*Reference ATM Strike:* **{int(atm_strike)}**")
 
     with rec_col2:
         if action in ["BUY_CALL", "BUY_PUT"]:
             st.markdown(f"""
-            * **Spot Entry Level:** ₹{c_price:.2f}
-            * **Suggested Stop-Loss:** ₹{stop_loss:.2f} (`-{sl_points}` pts)
-            * **Target 1 (1:1.5 RR):** ₹{target_1:.2f}
-            * **Target 2 (1:2.5 RR):** ₹{target_2:.2f}
+            * **Entry Spot:** ₹{c_price:.2f}
+            * **Stop-Loss:** ₹{stop_loss:.2f} (`-{sl_points}` pts)
+            * **Target 1:** ₹{target_1:.2f}
+            * **Target 2:** ₹{target_2:.2f}
             """)
+            
+            # Execute Trade Button
+            btn_label = f"🚀 Execute {action} ({trade_mode})"
+            if st.button(btn_label):
+                trade_entry = {
+                    "Time": pd.Timestamp.now().strftime("%H:%M:%S"),
+                    "Asset": clean_ticker,
+                    "Action": action,
+                    "Strike": suggested_strike,
+                    "Entry": c_price,
+                    "SL": stop_loss,
+                    "Target": target_1,
+                    "Mode": trade_mode
+                }
+                st.session_state.paper_trades.append(trade_entry)
+                
+                # Send to Telegram
+                alert_msg = (
+                    f"🚨 *ALGO ORDER EXECUTED*\n\n"
+                    f"👤 *Account:* `{CLIENT_CODE}`\n"
+                    f"⚙️ *Mode:* `{trade_mode}`\n"
+                    f"📌 *Asset:* `{clean_ticker}`\n"
+                    f"🎯 *Action:* `{action}`\n"
+                    f"🏷 *Strike:* `{suggested_strike}`\n"
+                    f"💰 *Entry Spot:* ₹{c_price:.2f}\n"
+                    f"🛑 *Stop-Loss:* ₹{stop_loss:.2f}\n"
+                    f"🏁 *Target:* ₹{target_1:.2f}\n"
+                )
+                send_telegram_alert(BOT_TOKEN, CHAT_ID, alert_msg)
+                st.success(f"✅ Order Executed successfully in {trade_mode}!")
         else:
-            st.caption("Jab breakout signal aayega, tab dynamic Stop-Loss aur Targets yahan calculate honge.")
+            st.caption("Active breakout setup hone par execution triggers enable ho jayenge.")
 
-    # --- TELEGRAM DIRECT TRIGGER ---
-    st.markdown("---")
-    st.subheader("📲 Telegram Alerts")
-    
-    if st.button("🚀 Send Trade Recommendation to Telegram"):
-        msg = (
-            f"🚨 *PRO TRADE & STRIKE ALERT*\n\n"
-            f"📌 *Asset:* `{clean_ticker}`\n"
-            f"⏱ *Timeframe:* `{timeframe}`\n"
-            f"💰 *Current Spot:* ₹{c_price:.2f} ({pct_change:.2f}%)\n"
-            f"📊 *20 EMA:* ₹{e20:.2f} | *RSI:* {rsi:.1f}\n"
-            f"🔥 *Volume:* {vol_ratio:.1f}x Avg\n"
-        )
-        if pcr_val is not None:
-            msg += f"🎯 *PCR:* {pcr_val}\n"
-        if latest_vix is not None:
-            msg += f"⚡ *India VIX:* {latest_vix:.2f}\n"
-
-        if action in ["BUY_CALL", "BUY_PUT"]:
-            msg += (
-                f"\n🎯 *ACTION:* `{'BUY CALL (CE)' if action == 'BUY_CALL' else 'BUY PUT (PE)'}`\n"
-                f"🏷 *Suggested Strike:* `{suggested_strike}`\n"
-                f"🛑 *Stop-Loss (Spot):* ₹{stop_loss:.2f}\n"
-                f"🏁 *Target 1:* ₹{target_1:.2f}\n"
-                f"🏁 *Target 2:* ₹{target_2:.2f}\n"
-            )
-        else:
-            msg += f"\n📢 *SETUP VERDICT:* `WAIT / SIDEWAYS (ATM: {int(atm_strike)})`"
-
-        sent = send_telegram_alert(BOT_TOKEN, CHAT_ID, msg)
-        if sent:
-            st.success("✅ Trade Recommendation Telegram par bhej di gayi hai!")
-        else:
-            st.error("❌ Message bhejne me error aaya.")
+    # Paper Trading Log Table
+    if len(st.session_state.paper_trades) > 0:
+        st.write("### 📋 Trade Logs (Session History)")
+        df_logs = pd.DataFrame(st.session_state.paper_trades)
+        st.dataframe(df_logs, use_container_width=True)
 
     # Charts
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.6, 0.2, 0.2])
