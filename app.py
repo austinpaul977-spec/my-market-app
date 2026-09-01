@@ -21,7 +21,7 @@ CLIENT_CODE = "O53184355"
 PIN = "1914"
 TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
 
-# Initialize Session State for Paper Trading
+# Initialize Session State
 if "paper_trades" not in st.session_state:
     st.session_state.paper_trades = []
 
@@ -58,7 +58,9 @@ asset_choice = st.sidebar.selectbox(
     index=0
 )
 clean_ticker = asset_choice.split(" ")[0]
-timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1h", "15m", "5m"], index=0)
+is_index = "NSEI" in clean_ticker or "NSEBANK" in clean_ticker
+
+timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "1d"], index=0)
 
 if timeframe in ["5m", "15m"]:
     period_options = ["1d", "5d", "1mo"]
@@ -172,7 +174,7 @@ if not data.empty and len(data) > 5:
     atr_val = get_val(latest['ATR']) if not np.isnan(get_val(latest['ATR'])) else (c_price * 0.005)
 
     pct_change = ((c_price - p_price) / p_price) * 100 if p_price > 0 else 0
-    vol_ratio = (c_vol / avg_vol) if avg_vol > 0 else 1.0
+    vol_ratio = (c_vol / avg_vol) if (avg_vol > 0 and not np.isnan(avg_vol)) else 1.0
 
     # Top Metrics Bar
     col1, col2, col3, col4, col5 = st.columns(5)
@@ -186,52 +188,35 @@ if not data.empty and len(data) > 5:
     else:
         col5.metric("India VIX", "N/A")
 
-    # Options PCR & Volatility Row
-    st.write("### 📌 Options PCR & Volatility Health")
-    c_pcr, c_vol_status = st.columns(2)
-
-    with c_pcr:
-        if pcr_val is not None:
-            if pcr_val >= 1.2:
-                st.success(f"📈 **PCR: {pcr_val} (Bullish Bias)** — Put Writing active, Support strong.")
-            elif pcr_val <= 0.75:
-                st.error(f"📉 **PCR: {pcr_val} (Bearish Bias)** — Call Writing active, Resistance strong.")
-            else:
-                st.info(f"⚖️ **PCR: {pcr_val} (Neutral / Sideways)** — Range-bound movement.")
-        else:
-            st.info("ℹ️ Index (NIFTY / BANKNIFTY) par PCR live evaluate hota hai.")
-
-    with c_vol_status:
-        if vol_ratio >= 1.5:
-            st.success(f"🔥 **Volume Spike Active:** Current volume {vol_ratio:.1f}x of 20-period average.")
-        else:
-            st.info(f"📊 **Volume Normal:** Trade volume around {vol_ratio:.1f}x of average.")
-
-    # Strike Selector & Strategy Rules
+    # Strike Selector
     step = 50 if "NSEI" in clean_ticker else (100 if "NSEBANK" in clean_ticker else 10)
     atm_strike = round(c_price / step) * step
 
-    trend_bullish = e20 > e50 and c_price > e20
-    trend_bearish = e20 < e50 and c_price < e20
+    # SMART TRIGGER LOGIC (Index me volume bypass, pure price action + EMA trend)
+    trend_bullish = (c_price > e20) and (e20 >= e50 or c_price > p_price)
+    trend_bearish = (c_price < e20) and (e20 <= e50 or c_price < p_price)
+    volume_condition = True if is_index else (vol_ratio >= 1.1)
 
     action = "WAIT"
     suggested_strike = ""
     stop_loss = 0.0
     target_1 = 0.0
     target_2 = 0.0
-    sl_points = round(atr_val * 1.2, 1)
+    sl_points = max(round(atr_val * 1.2, 1), 15.0 if "NSEI" in clean_ticker else 30.0)
 
-    if trend_bullish and vol_ratio >= 1.2:
+    # Bullish Trigger (RSI 45 to 82 allow karega strong trend me)
+    if trend_bullish and volume_condition and (45 <= rsi <= 85):
         action = "BUY_CALL"
         itm_strike = atm_strike - step
-        suggested_strike = f"{int(itm_strike)} CE"
+        suggested_strike = f"{int(itm_strike)} CE (ITM) / {int(atm_strike)} CE"
         stop_loss = c_price - sl_points
         target_1 = c_price + (sl_points * 1.5)
         target_2 = c_price + (sl_points * 2.5)
-    elif trend_bearish and vol_ratio >= 1.2:
+    # Bearish Trigger
+    elif trend_bearish and volume_condition and (15 <= rsi <= 55):
         action = "BUY_PUT"
         itm_strike = atm_strike + step
-        suggested_strike = f"{int(itm_strike)} PE"
+        suggested_strike = f"{int(itm_strike)} PE (ITM) / {int(atm_strike)} PE"
         stop_loss = c_price + sl_points
         target_1 = c_price - (sl_points * 1.5)
         target_2 = c_price - (sl_points * 2.5)
@@ -242,11 +227,11 @@ if not data.empty and len(data) > 5:
 
     with rec_col1:
         if action == "BUY_CALL":
-            st.success(f"🟢 **SIGNAL: BUY CALL (CE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price > 20 EMA with Bullish Volume Spike.")
+            st.success(f"🟢 **SIGNAL: BUY CALL (CE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Bullish Trend Active (Price > 20 EMA, Strong Momentum).")
         elif action == "BUY_PUT":
-            st.error(f"🔴 **SIGNAL: BUY PUT (PE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Price < 20 EMA with Bearish Pressure.")
+            st.error(f"🔴 **SIGNAL: BUY PUT (PE)**\n\n🎯 **Selected Strike:** `{suggested_strike}`\n\n⚡ **Rationale:** Bearish Trend Active (Price < 20 EMA, Downward Pressure).")
         else:
-            st.info(f"🟡 **NO ACTIVE TRADE (WAIT):** Market Sideways / Consolidating.\n\n*Reference ATM Strike:* **{int(atm_strike)}**")
+            st.info(f"🟡 **NO ACTIVE TRADE (WAIT):** Consolidating near EMA.\n\n*Reference ATM Strike:* **{int(atm_strike)}**")
 
     with rec_col2:
         if action in ["BUY_CALL", "BUY_PUT"]:
@@ -274,7 +259,7 @@ if not data.empty and len(data) > 5:
                 
                 # Send to Telegram
                 alert_msg = (
-                    f"🚨 *ALGO ORDER EXECUTED*\n\n"
+                    f"🚨 *MOMENTUM ALGO TRIGGER*\n\n"
                     f"👤 *Account:* `{CLIENT_CODE}`\n"
                     f"⚙️ *Mode:* `{trade_mode}`\n"
                     f"📌 *Asset:* `{clean_ticker}`\n"
@@ -282,12 +267,13 @@ if not data.empty and len(data) > 5:
                     f"🏷 *Strike:* `{suggested_strike}`\n"
                     f"💰 *Entry Spot:* ₹{c_price:.2f}\n"
                     f"🛑 *Stop-Loss:* ₹{stop_loss:.2f}\n"
-                    f"🏁 *Target:* ₹{target_1:.2f}\n"
+                    f"🏁 *Target 1:* ₹{target_1:.2f}\n"
+                    f"🏁 *Target 2:* ₹{target_2:.2f}\n"
                 )
                 send_telegram_alert(BOT_TOKEN, CHAT_ID, alert_msg)
-                st.success(f"✅ Order Executed successfully in {trade_mode}!")
+                st.success(f"✅ Order Executed in {trade_mode} & Telegram Alert Sent!")
         else:
-            st.caption("Active breakout setup hone par execution triggers enable ho jayenge.")
+            st.caption("Active trend setup aate hi trade trigger activate ho jayega.")
 
     # Paper Trading Log Table
     if len(st.session_state.paper_trades) > 0:
@@ -296,7 +282,7 @@ if not data.empty and len(data) > 5:
         st.dataframe(df_logs, use_container_width=True)
 
     # Charts
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.6, 0.2, 0.2])
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
         x=data.index,
         open=data['Open'].values.flatten() if hasattr(data['Open'], 'values') else data['Open'],
@@ -309,15 +295,11 @@ if not data.empty and len(data) > 5:
     fig.add_trace(go.Scatter(x=data.index, y=data['EMA_20'].values.flatten() if hasattr(data['EMA_20'], 'values') else data['EMA_20'], line=dict(color='orange', width=1.5), name="20 EMA"), row=1, col=1)
     fig.add_trace(go.Scatter(x=data.index, y=data['EMA_50'].values.flatten() if hasattr(data['EMA_50'], 'values') else data['EMA_50'], line=dict(color='cyan', width=1.5), name="50 EMA"), row=1, col=1)
 
-    colors = ['green' if (c >= o) else 'red' for o, c in zip(data['Open'].values.flatten(), data['Close'].values.flatten())]
-    fig.add_trace(go.Bar(x=data.index, y=data['Volume'].values.flatten() if hasattr(data['Volume'], 'values') else data['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=data.index, y=data['Vol_SMA_20'].values.flatten() if hasattr(data['Vol_SMA_20'], 'values') else data['Vol_SMA_20'], line=dict(color='yellow', width=1), name="20 Avg Vol"), row=2, col=1)
+    fig.add_trace(go.Scatter(x=data.index, y=data['RSI'].values.flatten() if hasattr(data['RSI'], 'values') else data['RSI'], line=dict(color='magenta', width=1.5), name="RSI (14)"), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-    fig.add_trace(go.Scatter(x=data.index, y=data['RSI'].values.flatten() if hasattr(data['RSI'], 'values') else data['RSI'], line=dict(color='magenta', width=1.5), name="RSI (14)"), row=3, col=1)
-    fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
-
-    fig.update_layout(height=750, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
+    fig.update_layout(height=650, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig, use_container_width=True)
 
     # --- AUTO-REFRESH TRIGGER ---
