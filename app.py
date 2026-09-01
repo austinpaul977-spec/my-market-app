@@ -5,10 +5,9 @@ from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 import requests
+import time
 
-st.set_page_config(page_title="Pro Algo & Strike Selector", layout="wide")
-
-st.title("🎯 Pro Market Trend, Strike Selector & Telegram Alerts")
+st.set_page_config(page_title="Live Market & Strike Engine", layout="wide")
 
 # Pre-configured Telegram credentials
 BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
@@ -47,6 +46,12 @@ else:
     default_p_idx = 2
 
 period = st.sidebar.selectbox("Data Period", period_options, index=default_p_idx)
+
+# --- AUTO-REFRESH SETTINGS ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Live Auto-Refresh")
+auto_refresh = st.sidebar.checkbox("Enable Auto-Refresh", value=True)
+refresh_interval = st.sidebar.slider("Refresh Interval (Seconds)", min_value=5, max_value=60, value=10, step=5)
 
 # Helper function to fetch live PCR
 def fetch_pcr(symbol_name):
@@ -88,8 +93,10 @@ if "NSEI" in clean_ticker:
 elif "NSEBANK" in clean_ticker:
     pcr_val, pe_oi, ce_oi = fetch_pcr("BANKNIFTY")
 
+st.title("🎯 Pro Market Trend, Strike Selector & Telegram Alerts")
+
 if not data.empty and len(data) > 5:
-    # Calculations: Moving Averages & Volume
+    # Calculations
     data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
     data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
     data['Vol_SMA_20'] = data['Volume'].rolling(window=20).mean()
@@ -101,7 +108,7 @@ if not data.empty and len(data) > 5:
     rs = gain / loss
     data['RSI'] = 100 - (100 / (1 + rs))
 
-    # ATR (Average True Range) for Dynamic Stoploss/Targets
+    # ATR
     high_low = data['High'] - data['Low']
     high_cp = np.abs(data['High'] - data['Close'].shift())
     low_cp = np.abs(data['Low'] - data['Close'].shift())
@@ -167,7 +174,6 @@ if not data.empty and len(data) > 5:
     trend_bullish = e20 > e50 and c_price > e20
     trend_bearish = e20 < e50 and c_price < e20
 
-    # Trade Setup Calculations
     action = "WAIT"
     suggested_strike = ""
     stop_loss = 0.0
@@ -220,7 +226,6 @@ if not data.empty and len(data) > 5:
     # --- TELEGRAM DIRECT TRIGGER ---
     st.markdown("---")
     st.subheader("📲 Telegram Alerts")
-    st.caption("Connected to bot: @Monty_market_bot")
     
     if st.button("🚀 Send Trade Recommendation to Telegram"):
         msg = (
@@ -249,7 +254,7 @@ if not data.empty and len(data) > 5:
 
         sent = send_telegram_alert(BOT_TOKEN, CHAT_ID, msg)
         if sent:
-            st.success("✅ Trade Recommendation Telegram (@Monty_market_bot) par bhej di gayi hai!")
+            st.success("✅ Trade Recommendation Telegram par bhej di gayi hai!")
         else:
             st.error("❌ Message bhejne me error aaya.")
 
@@ -277,6 +282,11 @@ if not data.empty and len(data) > 5:
 
     fig.update_layout(height=750, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=30, b=20))
     st.plotly_chart(fig, use_container_width=True)
+
+    # --- AUTO-REFRESH TRIGGER ---
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        st.rerun()
 
 else:
     st.error("Is timeframe ke liye data load nahi ho paya. Kripya chhota Period chunein.")
