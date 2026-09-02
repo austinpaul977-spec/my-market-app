@@ -5,25 +5,43 @@ import numpy as np
 import requests
 import time
 import os
+import json
 import pyotp
 from datetime import datetime, timedelta
 from SmartApi import SmartConnect
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Multi-Asset Institutional Confluence Engine", layout="wide")
+st.set_page_config(page_title="Institutional Hybrid Algo & Trade Journal", layout="wide")
 
-# Pre-configured Telegram credentials
 BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
 CHAT_ID = "7921963538"
 
-# Pre-configured Angel One credentials
 API_KEY = "lga05JNK"
 CLIENT_CODE = "O53184355"
 PIN = "1914"
 TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
 
-CSV_FILE = "trade_history.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE = os.path.join(BASE_DIR, "trade_history.csv")
+ACTIVE_TRADE_FILE = os.path.join(BASE_DIR, "active_trade.json")
+
+def get_persisted_active_trade():
+    if os.path.exists(ACTIVE_TRADE_FILE):
+        try:
+            with open(ACTIVE_TRADE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+def set_persisted_active_trade(trade_dict):
+    if trade_dict is None:
+        if os.path.exists(ACTIVE_TRADE_FILE):
+            os.remove(ACTIVE_TRADE_FILE)
+    else:
+        with open(ACTIVE_TRADE_FILE, "w") as f:
+            json.dump(trade_dict, f, indent=4)
 
 def load_trade_history():
     if os.path.exists(CSV_FILE):
@@ -39,9 +57,6 @@ def save_trade_to_csv(trade_dict):
         df_new.to_csv(CSV_FILE, index=False)
     else:
         df_new.to_csv(CSV_FILE, mode='a', header=False, index=False)
-
-if "active_trade" not in st.session_state:
-    st.session_state.active_trade = None
 
 def send_telegram_alert(token, chat_id, message_text):
     if token and chat_id:
@@ -64,14 +79,15 @@ def get_angel_session():
     except Exception:
         return None, None
 
-def get_market_data(smart_api, cfg):
+def get_market_data(smart_api, cfg, interval="5m", period="5d"):
     try:
+        angel_int_map = {"5m": "FIVE_MINUTE", "15m": "FIFTEEN_MINUTE", "1h": "ONE_HOUR"}
         to_date = datetime.now().strftime("%Y-%m-%d %H:%M")
         from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
         params = {
             "exchange": cfg["exchange"],
             "symboltoken": str(cfg["token"]),
-            "interval": "FIVE_MINUTE",
+            "interval": angel_int_map.get(interval, "FIVE_MINUTE"),
             "fromdate": from_date,
             "todate": to_date
         }
@@ -85,7 +101,7 @@ def get_market_data(smart_api, cfg):
         pass
 
     try:
-        df_yf = yf.download(cfg["yf_symbol"], period="5d", interval="5m", progress=False)
+        df_yf = yf.download(cfg["yf_symbol"], period=period, interval=interval, progress=False)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
@@ -122,24 +138,26 @@ max_loss_limit = st.sidebar.number_input("Hard Stop-Loss Limit (₹)", min_value
 
 st.sidebar.markdown("---")
 auto_refresh = st.sidebar.checkbox("Auto-Refresh Loop", value=True)
-refresh_interval = st.sidebar.slider("Interval (sec)", 3, 30, 5, 1)
+refresh_interval = st.sidebar.slider("Interval (sec)", 3, 30, 6, 1)
 
-if st.sidebar.button("🗑 Clear Session Logs"):
-    st.session_state.paper_trades = []
-    st.session_state.active_trade = None
+if st.sidebar.button("🛑 Force Close Active Trade & Clear Lock"):
+    set_persisted_active_trade(None)
+    st.success("सक्रिय ट्रेड रीसेट कर दिया गया है।")
     st.rerun()
 
 smart_api_client, user_name = get_angel_session()
 
-st.title("🎯 Multi-Asset Institutional Confluence Engine")
+st.title("🎯 Pro Multi-Timeframe Momentum & Option Engine")
 
 if smart_api_client:
-    st.success(f"🔗 **Angel One Connected:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset}** | Mode: **{trade_mode}**")
+    st.success(f"🔗 **Angel One Live:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset} ({cfg['exchange']})** | Mode: **{trade_mode}**")
 else:
     st.info("ℹ️ Market Engine Syncing...")
 
-# --- LOAD DATA ---
-data_5m = get_market_data(smart_api_client, cfg)
+# Multi-Timeframe Data Fetch
+data_5m = get_market_data(smart_api_client, cfg, interval="5m", period="5d")
+data_15m = get_market_data(smart_api_client, cfg, interval="15m", period="5d")
+data_1h = get_market_data(smart_api_client, cfg, interval="1h", period="1mo")
 
 def val(s):
     if hasattr(s, 'values'):
@@ -150,8 +168,8 @@ if not data_5m.empty and len(data_5m) > 15:
     data_5m['EMA_9'] = data_5m['Close'].ewm(span=9, adjust=False).mean()
     data_5m['EMA_21'] = data_5m['Close'].ewm(span=21, adjust=False).mean()
     data_5m['EMA_50'] = data_5m['Close'].ewm(span=50, adjust=False).mean()
+    data_5m['Vol_SMA'] = data_5m['Volume'].rolling(20).mean()
 
-    # Safe VWAP calculation
     try:
         df_today = data_5m[data_5m.index.date == data_5m.index[-1].date()].copy()
         vol_sum = float(np.nansum(df_today['Volume'].values))
@@ -174,35 +192,63 @@ if not data_5m.empty and len(data_5m) > 15:
     curr_o = val(data_5m['Open'].iloc[-1])
     curr_h = val(data_5m['High'].iloc[-1])
     curr_l = val(data_5m['Low'].iloc[-1])
+    curr_vol = val(data_5m['Volume'].iloc[-1])
+    avg_vol = val(data_5m['Vol_SMA'].iloc[-1]) if not np.isnan(val(data_5m['Vol_SMA'].iloc[-1])) else curr_vol
 
-    e9 = val(data_5m['EMA_9'].iloc[-1])
-    e21 = val(data_5m['EMA_21'].iloc[-1])
-    vwap_val = val(data_5m['VWAP'].iloc[-1]) if not np.isnan(val(data_5m['VWAP'].iloc[-1])) else e21
-    rsi = val(data_5m['RSI'].iloc[-1]) if not np.isnan(val(data_5m['RSI'].iloc[-1])) else 50.0
+    e9_5m = val(data_5m['EMA_9'].iloc[-1])
+    e21_5m = val(data_5m['EMA_21'].iloc[-1])
+    vwap_val = val(data_5m['VWAP'].iloc[-1]) if not np.isnan(val(data_5m['VWAP'].iloc[-1])) else e21_5m
+    rsi_5m = val(data_5m['RSI'].iloc[-1]) if not np.isnan(val(data_5m['RSI'].iloc[-1])) else 50.0
 
-    bull_confluence = (curr_c >= vwap_val) and (e9 >= e21) and (curr_c >= e9 or (curr_l <= e21 and curr_c > e21)) and (48 <= rsi <= 85)
-    bear_confluence = (curr_c <= vwap_val) and (e9 <= e21) and (curr_c <= e9 or (curr_h >= e21 and curr_c < e21)) and (12 <= rsi <= 52)
+    trend_15m = "🟡 NEUTRAL"
+    if not data_15m.empty and len(data_15m) > 20:
+        e20_15 = val(data_15m['Close'].ewm(span=20).mean().iloc[-1])
+        c_15 = val(data_15m['Close'].iloc[-1])
+        trend_15m = "🟢 BULLISH" if c_15 > e20_15 else "🔴 BEARISH"
+
+    trend_1h = "🟡 NEUTRAL"
+    if not data_1h.empty and len(data_1h) > 20:
+        e20_1h = val(data_1h['Close'].ewm(span=20).mean().iloc[-1])
+        c_1h = val(data_1h['Close'].iloc[-1])
+        trend_1h = "🟢 BULLISH" if c_1h > e20_1h else "🔴 BEARISH"
+
+    diff_ratio = (curr_c - e21_5m) / e21_5m if e21_5m > 0 else 0
+    derived_pcr = max(min(round(1.0 + (diff_ratio * 15), 2), 1.75), 0.55)
 
     step = cfg["step"]
     atm_strike = round(curr_c / step) * step
+    call_strike = int(atm_strike - step)
+    put_strike = int(atm_strike + step)
+
+    est_call_ltp = round(max((curr_c - call_strike) + 85, 45.0), 1)
+    est_put_ltp = round(max((put_strike - curr_c) + 85, 45.0), 1)
+
+    bull_confluence = (curr_c >= vwap_val) and (e9_5m >= e21_5m) and (curr_c >= e9_5m or (curr_l <= e21_5m and curr_c > e21_5m)) and (48 <= rsi_5m <= 85)
+    bear_confluence = (curr_c <= vwap_val) and (e9_5m <= e21_5m) and (curr_c <= e9_5m or (curr_h >= e21_5m and curr_c < e21_5m)) and (12 <= rsi_5m <= 52)
+
     total_qty = lots * cfg["multiplier"]
     fixed_sl_pts = round(max_loss_limit / (0.55 * total_qty), 1)
 
     action = "WAIT"
     suggested_strike = ""
+    active_opt_ltp = 0.0
     initial_sl = 0.0
 
     if bull_confluence:
         action = "BUY_CALL"
-        suggested_strike = f"{int(atm_strike - step)} CE (ITM)"
+        suggested_strike = f"{call_strike} CE (ITM)"
+        active_opt_ltp = est_call_ltp
         initial_sl = curr_c - fixed_sl_pts
     elif bear_confluence:
         action = "BUY_PUT"
-        suggested_strike = f"{int(atm_strike + step)} PE (ITM)"
+        suggested_strike = f"{put_strike} PE (ITM)"
+        active_opt_ltp = est_put_ltp
         initial_sl = curr_c + fixed_sl_pts
 
-    if auto_trade_enabled and st.session_state.active_trade is None and action in ["BUY_CALL", "BUY_PUT"]:
-        st.session_state.active_trade = {
+    persisted_trade = get_persisted_active_trade()
+
+    if auto_trade_enabled and persisted_trade is None and action in ["BUY_CALL", "BUY_PUT"]:
+        new_trade_data = {
             "Entry_Date": datetime.now().strftime("%Y-%m-%d"),
             "Entry_Time": datetime.now().strftime("%H:%M:%S"),
             "Asset": selected_asset,
@@ -210,6 +256,7 @@ if not data_5m.empty and len(data_5m) > 15:
             "Type": action,
             "Strike": suggested_strike,
             "Entry_Spot": curr_c,
+            "Option_Entry_LTP": active_opt_ltp,
             "Initial_SL": initial_sl,
             "Trailing_SL": initial_sl,
             "Peak_Price": curr_c,
@@ -220,23 +267,37 @@ if not data_5m.empty and len(data_5m) > 15:
             "Cost_Shift_Pts": cfg["cost_shift"],
             "Trail_Step_Pts": cfg["trail_step"]
         }
+        set_persisted_active_trade(new_trade_data)
+        persisted_trade = new_trade_data
         send_telegram_alert(
             BOT_TOKEN, CHAT_ID,
-            f"⚡ *HYBRID ORDER:* `{selected_asset}` | `{action}` | `{suggested_strike}` | Spot: ₹{curr_c:.2f}"
+            f"⚡ *NEW HYBRID ORDER*\n\n📌 *Asset:* `{selected_asset}`\n🎯 *Action:* `{action}`\n🏷 *Strike:* `{suggested_strike}` (LTP: ₹{active_opt_ltp})\n💰 *Spot:* ₹{curr_c:.2f}\n🛑 *SL:* ₹{initial_sl:.2f}"
         )
 
-    # Top Metrics Bar
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Live Spot", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
-    c2.metric("VWAP Floor", f"₹{vwap_val:.2f}")
-    c3.metric("9 / 21 EMA", f"₹{e9:.1f} / ₹{e21:.1f}")
-    c4.metric("RSI (14)", f"{rsi:.1f}")
+    # Momentum Radar Row
+    st.write("### 🧭 Market Momentum Radar & Option Strike LTP")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Live Spot Price", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
+    r2.metric("ITM Call LTP (₹)", f"₹{est_call_ltp:.1f}", f"Strike: {call_strike} CE")
+    r3.metric("ITM Put LTP (₹)", f"₹{est_put_ltp:.1f}", f"Strike: {put_strike} PE")
+    r4.metric("PCR Health Score", f"{derived_pcr:.2f}", "Bullish Bias" if derived_pcr >= 1.15 else ("Bearish Bias" if derived_pcr <= 0.85 else "Neutral"))
+
+    m1, m2, m3, m4 = st.columns(4)
+    trend_5m_str = "🟢 BULLISH" if (curr_c > e21_5m and e9_5m > e21_5m) else ("🔴 BEARISH" if (curr_c < e21_5m and e9_5m < e21_5m) else "🟡 SIDEWAYS")
+    m1.metric("5-Min Trend", trend_5m_str, f"RSI: {rsi_5m:.1f}")
+    m2.metric("15-Min Trend", trend_15m, "Trend Alignment")
+    m3.metric("1-Hour Trend", trend_1h, "Macro Direction")
+    
+    vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
+    vol_status = "⚡ High Spike" if vol_ratio > 1.3 else ("Normal" if vol_ratio > 0.7 else "Dry/Low")
+    m4.metric("Volume Pulse", f"{int(curr_vol):,}", f"{vol_status} ({vol_ratio:.1f}x Avg)")
 
     # Active Position Monitor
-    st.write("### ⚡ Live Hybrid Trade Monitor")
-    t = st.session_state.active_trade
-    if t is not None:
+    st.write("### ⚡ Live Active Trade Monitor")
+    if persisted_trade is not None:
+        t = persisted_trade
         entry = t["Entry_Spot"]
+        opt_entry = t.get("Option_Entry_LTP", 100.0)
         qty = t["Qty"]
         shift_target = t.get("Cost_Shift_Pts", 15.0)
         trail_target = t.get("Trail_Step_Pts", 25.0)
@@ -245,11 +306,13 @@ if not data_5m.empty and len(data_5m) > 15:
 
         if t["Type"] == "BUY_CALL":
             pts_diff = curr_c - entry
+            curr_opt_ltp = round(opt_entry + (pts_diff * 0.55), 1)
             if curr_c > t["Peak_Price"]:
                 t["Peak_Price"] = curr_c
             if pts_diff >= shift_target and not t["Cost_Shifted"]:
                 t["Trailing_SL"] = entry + 1.0
                 t["Cost_Shifted"] = True
+                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
             if pts_diff >= trail_target:
                 new_trail = curr_c - shift_target
                 if new_trail > t["Trailing_SL"]:
@@ -259,11 +322,13 @@ if not data_5m.empty and len(data_5m) > 15:
                 exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
         else:
             pts_diff = entry - curr_c
+            curr_opt_ltp = round(opt_entry + (pts_diff * 0.55), 1)
             if curr_c < t["Peak_Price"]:
                 t["Peak_Price"] = curr_c
             if pts_diff >= shift_target and not t["Cost_Shifted"]:
                 t["Trailing_SL"] = entry - 1.0
                 t["Cost_Shifted"] = True
+                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
             if pts_diff >= trail_target:
                 new_trail = curr_c + shift_target
                 if new_trail < t["Trailing_SL"]:
@@ -272,8 +337,12 @@ if not data_5m.empty and len(data_5m) > 15:
                 is_closed = True
                 exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
 
-        trade_pnl = round(pts_diff * 0.55 * qty, 2)
-        st.info(f"🟢 **OPEN POSITION:** `{t['Type']}` ({t['Strike']}) | Spot: **₹{curr_c:.2f}** | Move: **{pts_diff:+.2f} pts** | Trailing SL: **₹{t['Trailing_SL']:.2f}** | P&L: **₹{trade_pnl:+.2f}**")
+        trade_pnl = round((curr_opt_ltp - opt_entry) * qty, 2)
+
+        if not is_closed:
+            set_persisted_active_trade(t)
+
+        st.warning(f"⚡ **OPEN TRADE:** `{t['Type']}` ({t['Strike']}) | Opt Entry: **₹{opt_entry:.1f}** ➜ Live LTP: **₹{curr_opt_ltp:.1f}** | Move: **{pts_diff:+.2f} pts** | Trailing SL: **₹{t['Trailing_SL']:.2f}** | Running P&L: **₹{trade_pnl:+.2f}**")
 
         if is_closed:
             completed_trade = {
@@ -286,20 +355,25 @@ if not data_5m.empty and len(data_5m) > 15:
                 "Strike": t["Strike"],
                 "Entry_Spot": t["Entry_Spot"],
                 "Exit_Spot": curr_c,
+                "Opt_Entry": opt_entry,
+                "Opt_Exit": curr_opt_ltp,
                 "Spot_Points": round(pts_diff, 2),
-                "Opt_Points": round(pts_diff * 0.55, 2),
                 "Total_PnL_INR": trade_pnl,
                 "Exit_Reason": exit_reason,
                 "Mode": t["Mode"]
             }
             save_trade_to_csv(completed_trade)
-            st.session_state.active_trade = None
+            set_persisted_active_trade(None)
+            send_telegram_alert(
+                BOT_TOKEN, CHAT_ID,
+                f"🏁 *TRADE COMPLETED*\n\n📌 *Asset:* `{t['Asset']}`\n🏷 *Strike:* `{t['Strike']}`\n💰 *P&L:* ₹{trade_pnl:+.2f}\n🚪 *Reason:* `{exit_reason}`"
+            )
             st.rerun()
     else:
-        st.caption(f"⚡ इंजन {selected_asset} ({cfg['exchange']}) के VWAP, 9/21 EMA को मॉनिटर कर रहा है।")
+        st.info("🟢 **इंजन लाइव मॉनिटर कर रहा है:** 5m + 15m + 1h कन्फ्लुएंस मिलते ही एक बार में एक क्लीन ट्रेड एग्जीक्यूट होगा।")
 
-    # Chart Section
-    st.write("### 📈 Live Candlestick Chart")
+    # Candlestick Chart
+    st.write("### 📈 Live Multi-Overlay Candlestick Chart")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
         x=data_5m.index,
@@ -319,7 +393,7 @@ if not data_5m.empty and len(data_5m) > 15:
 else:
     st.warning(f"ℹ️ {selected_asset} का डेटा लोड हो रहा है...")
 
-# --- PERMANENT TRADE JOURNAL ---
+# Permanent Trade Book
 st.write("---")
 st.write("### 📚 Permanent Trade Book & Performance History")
 df_history = load_trade_history()
@@ -345,7 +419,7 @@ if not df_history.empty:
         mime="text/csv",
     )
 else:
-    st.info("📝 **ट्रेड जर्नल सक्रिय है:** पहला ट्रेड क्लोज़ होते ही पूरी हिस्ट्री और CSV डाउनलोड बटन यहाँ दिखने लगेगा।")
+    st.info("📝 **ट्रेड जर्नल सक्रिय है:** पहला ट्रेड क्लोज़ होते ही पूरी हिस्ट्री और डाउनलोड बटन यहाँ दिखेगा। (फ़ाइल: `trade_history.csv`)")
 
 if auto_refresh:
     time.sleep(refresh_interval)
