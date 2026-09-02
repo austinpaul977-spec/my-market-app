@@ -12,16 +12,19 @@ from SmartApi import SmartConnect
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Institutional Hybrid Algo & Trade Journal", layout="wide")
+st.set_page_config(page_title="Institutional Hybrid Algo & Live Position Terminal", layout="wide")
 
+# Pre-configured Telegram credentials
 BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
 CHAT_ID = "7921963538"
 
+# Pre-configured Angel One credentials
 API_KEY = "lga05JNK"
 CLIENT_CODE = "O53184355"
 PIN = "1914"
 TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
 
+# File Paths for Persistent Storage
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_FILE = os.path.join(BASE_DIR, "trade_history.csv")
 ACTIVE_TRADE_FILE = os.path.join(BASE_DIR, "active_trade.json")
@@ -138,7 +141,7 @@ max_loss_limit = st.sidebar.number_input("Hard Stop-Loss Limit (₹)", min_value
 
 st.sidebar.markdown("---")
 auto_refresh = st.sidebar.checkbox("Auto-Refresh Loop", value=True)
-refresh_interval = st.sidebar.slider("Interval (sec)", 3, 30, 6, 1)
+refresh_interval = st.sidebar.slider("Interval (sec)", 3, 30, 5, 1)
 
 if st.sidebar.button("🛑 Force Close Active Trade & Clear Lock"):
     set_persisted_active_trade(None)
@@ -147,10 +150,10 @@ if st.sidebar.button("🛑 Force Close Active Trade & Clear Lock"):
 
 smart_api_client, user_name = get_angel_session()
 
-st.title("🎯 Pro Multi-Timeframe Momentum & Option Engine")
+st.title("🎯 Institutional Hybrid Engine & Live Trading Terminal")
 
 if smart_api_client:
-    st.success(f"🔗 **Angel One Live:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset} ({cfg['exchange']})** | Mode: **{trade_mode}**")
+    st.success(f"🔗 **Angel One Live Feed:** {user_name} (`{CLIENT_CODE}`) | Asset: **{selected_asset} ({cfg['exchange']})** | Mode: **{trade_mode}**")
 else:
     st.info("ℹ️ Market Engine Syncing...")
 
@@ -165,11 +168,13 @@ def val(s):
     return float(s)
 
 if not data_5m.empty and len(data_5m) > 15:
+    # 5-Min Indicators (Hybrid Engine)
     data_5m['EMA_9'] = data_5m['Close'].ewm(span=9, adjust=False).mean()
     data_5m['EMA_21'] = data_5m['Close'].ewm(span=21, adjust=False).mean()
     data_5m['EMA_50'] = data_5m['Close'].ewm(span=50, adjust=False).mean()
     data_5m['Vol_SMA'] = data_5m['Volume'].rolling(20).mean()
 
+    # VWAP Calculation
     try:
         df_today = data_5m[data_5m.index.date == data_5m.index[-1].date()].copy()
         vol_sum = float(np.nansum(df_today['Volume'].values))
@@ -181,6 +186,7 @@ if not data_5m.empty and len(data_5m) > 15:
     except Exception:
         data_5m['VWAP'] = data_5m['EMA_21']
 
+    # RSI
     delta = data_5m['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -197,9 +203,11 @@ if not data_5m.empty and len(data_5m) > 15:
 
     e9_5m = val(data_5m['EMA_9'].iloc[-1])
     e21_5m = val(data_5m['EMA_21'].iloc[-1])
+    e50_5m = val(data_5m['EMA_50'].iloc[-1])
     vwap_val = val(data_5m['VWAP'].iloc[-1]) if not np.isnan(val(data_5m['VWAP'].iloc[-1])) else e21_5m
     rsi_5m = val(data_5m['RSI'].iloc[-1]) if not np.isnan(val(data_5m['RSI'].iloc[-1])) else 50.0
 
+    # 15-Min & 1-Hour Trend
     trend_15m = "🟡 NEUTRAL"
     if not data_15m.empty and len(data_15m) > 20:
         e20_15 = val(data_15m['Close'].ewm(span=20).mean().iloc[-1])
@@ -223,6 +231,7 @@ if not data_5m.empty and len(data_5m) > 15:
     est_call_ltp = round(max((curr_c - call_strike) + 85, 45.0), 1)
     est_put_ltp = round(max((put_strike - curr_c) + 85, 45.0), 1)
 
+    # Hybrid Confluence Conditions
     bull_confluence = (curr_c >= vwap_val) and (e9_5m >= e21_5m) and (curr_c >= e9_5m or (curr_l <= e21_5m and curr_c > e21_5m)) and (48 <= rsi_5m <= 85)
     bear_confluence = (curr_c <= vwap_val) and (e9_5m <= e21_5m) and (curr_c <= e9_5m or (curr_h >= e21_5m and curr_c < e21_5m)) and (12 <= rsi_5m <= 52)
 
@@ -247,6 +256,7 @@ if not data_5m.empty and len(data_5m) > 15:
 
     persisted_trade = get_persisted_active_trade()
 
+    # Auto Entry Trigger (One trade at a time)
     if auto_trade_enabled and persisted_trade is None and action in ["BUY_CALL", "BUY_PUT"]:
         new_trade_data = {
             "Entry_Date": datetime.now().strftime("%Y-%m-%d"),
@@ -274,8 +284,8 @@ if not data_5m.empty and len(data_5m) > 15:
             f"⚡ *NEW HYBRID ORDER*\n\n📌 *Asset:* `{selected_asset}`\n🎯 *Action:* `{action}`\n🏷 *Strike:* `{suggested_strike}` (LTP: ₹{active_opt_ltp})\n💰 *Spot:* ₹{curr_c:.2f}\n🛑 *SL:* ₹{initial_sl:.2f}"
         )
 
-    # Momentum Radar Row
-    st.write("### 🧭 Market Momentum Radar & Option Strike LTP")
+    # --- TOP METRICS & STRATEGY CONFLUENCE RADAR ---
+    st.write("### 🧭 Hybrid Strategy Confluence & Options Radar")
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("Live Spot Price", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
     r2.metric("ITM Call LTP (₹)", f"₹{est_call_ltp:.1f}", f"Strike: {call_strike} CE")
@@ -284,16 +294,17 @@ if not data_5m.empty and len(data_5m) > 15:
 
     m1, m2, m3, m4 = st.columns(4)
     trend_5m_str = "🟢 BULLISH" if (curr_c > e21_5m and e9_5m > e21_5m) else ("🔴 BEARISH" if (curr_c < e21_5m and e9_5m < e21_5m) else "🟡 SIDEWAYS")
-    m1.metric("5-Min Trend", trend_5m_str, f"RSI: {rsi_5m:.1f}")
-    m2.metric("15-Min Trend", trend_15m, "Trend Alignment")
-    m3.metric("1-Hour Trend", trend_1h, "Macro Direction")
+    m1.metric("5-Min Hybrid Trend", trend_5m_str, f"RSI: {rsi_5m:.1f}")
+    m2.metric("15-Min Structure", trend_15m, "Trend Sync")
+    m3.metric("VWAP Floor", f"₹{vwap_val:.2f}", f"Diff: {curr_c - vwap_val:+.2f}")
     
     vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
     vol_status = "⚡ High Spike" if vol_ratio > 1.3 else ("Normal" if vol_ratio > 0.7 else "Dry/Low")
     m4.metric("Volume Pulse", f"{int(curr_vol):,}", f"{vol_status} ({vol_ratio:.1f}x Avg)")
 
-    # Active Position Monitor
-    st.write("### ⚡ Live Active Trade Monitor")
+    # --- SECTION 1: LIVE POSITION TERMINAL (TRADING APP UI) ---
+    st.write("---")
+    st.write("### 💼 Live Position Terminal (Real-Time Trade Monitor)")
     if persisted_trade is not None:
         t = persisted_trade
         entry = t["Entry_Spot"]
@@ -342,7 +353,15 @@ if not data_5m.empty and len(data_5m) > 15:
         if not is_closed:
             set_persisted_active_trade(t)
 
-        st.warning(f"⚡ **OPEN TRADE:** `{t['Type']}` ({t['Strike']}) | Opt Entry: **₹{opt_entry:.1f}** ➜ Live LTP: **₹{curr_opt_ltp:.1f}** | Move: **{pts_diff:+.2f} pts** | Trailing SL: **₹{t['Trailing_SL']:.2f}** | Running P&L: **₹{trade_pnl:+.2f}**")
+        # UI Card View (Just like Trading Apps)
+        pos_col1, pos_col2, pos_col3, pos_col4 = st.columns(4)
+        pos_col1.metric("Position Instrument", f"{t['Strike']}", f"Side: {t['Type']}")
+        pos_col2.metric("Option Premium LTP", f"₹{curr_opt_ltp:.1f}", f"Entry: ₹{opt_entry:.1f}")
+        pos_col3.metric("Spot Movement", f"{pts_diff:+.2f} pts", f"Entry Spot: ₹{entry:.2f}")
+        pnl_delta_str = f"₹{trade_pnl:+.2f}"
+        pos_col4.metric("Live Net P&L (₹)", pnl_delta_str, delta=f"{trade_pnl:.2f}")
+
+        st.info(f"🛡️ **Risk Status:** Trailing SL active at **₹{t['Trailing_SL']:.2f}** | {'Protected at Cost (Zero Risk) 🔒' if t['Cost_Shifted'] else 'Initial SL Active ⏳'}")
 
         if is_closed:
             completed_trade = {
@@ -370,10 +389,10 @@ if not data_5m.empty and len(data_5m) > 15:
             )
             st.rerun()
     else:
-        st.info("🟢 **इंजन लाइव मॉनिटर कर रहा है:** 5m + 15m + 1h कन्फ्लुएंस मिलते ही एक बार में एक क्लीन ट्रेड एग्जीक्यूट होगा।")
+        st.info("🟢 **इंजन लाइव मॉनिटर कर रहा है:** VWAP + 9/21 EMA + Liquidity Confluence मिलते ही क्लीन ऑर्डर लगेगा। (डुप्लीकेट ऑर्डर ब्लॉक्ड)")
 
     # Candlestick Chart
-    st.write("### 📈 Live Multi-Overlay Candlestick Chart")
+    st.write("### 📈 Live Candlestick Chart (VWAP & 9/21 EMA Multi-Overlay)")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
     fig.add_trace(go.Candlestick(
         x=data_5m.index,
@@ -393,9 +412,9 @@ if not data_5m.empty and len(data_5m) > 15:
 else:
     st.warning(f"ℹ️ {selected_asset} का डेटा लोड हो रहा है...")
 
-# Permanent Trade Book
+# --- SECTION 2: PERMANENT TRADE JOURNAL (ALWAYS VISIBLE) ---
 st.write("---")
-st.write("### 📚 Permanent Trade Book & Performance History")
+st.write("### 📚 Completed Trade Book & Historical Performance")
 df_history = load_trade_history()
 
 if not df_history.empty:
