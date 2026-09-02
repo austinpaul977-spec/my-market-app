@@ -1,4 +1,4 @@
-from strategy import get_nifty_signal
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -544,3 +544,58 @@ else:
 if auto_refresh:
     time.sleep(refresh_interval)
     st.rerun()
+    import pandas as pd
+import ta
+from datetime import datetime, timedelta
+
+def get_nifty_signal(smart_api):
+    to_date = datetime.now().strftime('%Y-%m-%d %H:%M')
+    from_date = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d 09:15')
+
+    params = {
+        "exchange": "NSE",
+        "symboltoken": "99926000",
+        "interval": "FIVE_MINUTE",
+        "fromdate": from_date,
+        "todate": to_date
+    }
+    try:
+        response = smart_api.getCandleData(params)
+        if not response or response.get('data') is None:
+            return None, 0
+            
+        candles = response['data']
+        df = pd.DataFrame(candles, columns=['datetime', 'open', 'high', 'low', 'close', 'volume'])
+        df['close'] = df['close'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+        
+        df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
+        df['ema20'] = ta.trend.EMAIndicator(close=df['close'], window=20).ema_indicator()
+        
+        df['pivot_low'] = df['low'] == df['low'].rolling(window=11, center=True).min()
+        df['pivot_high'] = df['high'] == df['high'].rolling(window=11, center=True).max()
+        
+        latest_close = df['close'].iloc[-1]
+        latest_ema = df['ema20'].iloc[-1]
+        
+        low_pivots = df[df['pivot_low']].tail(2)
+        if len(low_pivots) == 2:
+            prev_p = low_pivots.iloc[0]
+            curr_p = low_pivots.iloc[1]
+            if curr_p['low'] < prev_p['low'] and curr_p['rsi'] > prev_p['rsi']:
+                if latest_close > latest_ema:
+                    return "BUY_CALL", latest_close
+
+        high_pivots = df[df['pivot_high']].tail(2)
+        if len(high_pivots) == 2:
+            prev_p = high_pivots.iloc[0]
+            curr_p = high_pivots.iloc[1]
+            if curr_p['high'] > prev_p['high'] and curr_p['rsi'] < prev_p['rsi']:
+                if latest_close < latest_ema:
+                    return "BUY_PUT", latest_close
+                    
+        return None, latest_close
+    except Exception as e:
+        print(f"Strategy Error: {e}")
+        return None, 0
