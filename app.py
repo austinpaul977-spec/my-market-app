@@ -1,601 +1,534 @@
-
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import requests
-import time
 import os
-import json
-import pyotp
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
-from SmartApi import SmartConnect
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import urllib.parse
+from datetime import datetime
+import pandas as pd
+import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 
-st.set_page_config(page_title="Institutional Tri-Engine Algo Terminal", layout="wide")
+st.set_page_config(
+    page_title="Indore East Congregation - Field Service Portal",
+    page_icon="📖",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# Pre-configured Telegram credentials
-BOT_TOKEN = "8751296227:AAERElotbBhsItNoZAsFjIgYhArGB3Mw1eI"
-CHAT_ID = "7921963538"
-
-# Pre-configured Angel One credentials
-API_KEY = "lga05JNK"
-CLIENT_CODE = "O53184355"
-PIN = "1914"
-TOTP_SECRET = "QNJM3G2COJWVQ44CVS4CFHBKIE"
-
-# File Paths for Persistent Storage
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(BASE_DIR, "trade_history.csv")
-ACTIVE_TRADE_FILE = os.path.join(BASE_DIR, "active_trade.json")
-TV_SIGNAL_FILE = os.path.join(BASE_DIR, "tv_signals.json")
-
-# --- TRADINGVIEW WEBHOOK RECEIVER (BACKGROUND THREAD) ---
-class WebhookHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            payload = json.loads(post_data)
-            with open(TV_SIGNAL_FILE, "w") as f:
-                json.dump({"signal": payload.get("signal", ""), "asset": payload.get("asset", ""), "time": datetime.now().strftime("%H:%M:%S")}, f)
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "received"}).encode('utf-8'))
-        except Exception:
-            self.send_response(400)
-            self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-def start_webhook_server():
-    try:
-        server = HTTPServer(('0.0.0.0', 5001), WebhookHandler)
-        server.serve_forever()
-    except Exception:
-        pass
-
-if "webhook_started" not in st.session_state:
-    t_wh = threading.Thread(target=start_webhook_server, daemon=True)
-    t_wh.start()
-    st.session_state.webhook_started = True
-
-def get_latest_tv_signal():
-    if os.path.exists(TV_SIGNAL_FILE):
-        try:
-            with open(TV_SIGNAL_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
-
-# --- NSE OPTION CHAIN SCRAPER ---
-def fetch_nse_option_chain(symbol="NIFTY"):
-    url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br"
+# 🛑 UI STYLING & WATERMARK REMOVAL
+clean_ui_css = """
+    <style>
+    footer { display: none !important; visibility: hidden !important; }
+    div[class*="viewerBadge"],
+    div[class*="ProfileButton"],
+    div[class*="StreamlitBranding"],
+    div[class*="stAppDeployButton"],
+    div[data-testid="stStatusWidget"],
+    div[data-testid="stDecoration"],
+    [data-testid="stAppViewerBadge"],
+    .viewerBadge_container__1QSob,
+    .viewerBadge_link__1S137,
+    #root > div:first-child > div:nth-child(2) {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
     }
-    try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        response = session.get(url, headers=headers, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            records = data.get('records', {}).get('data', [])
-            parsed = []
-            for item in records:
-                strike = item.get('strikePrice')
-                ce = item.get('CE', {})
-                pe = item.get('PE', {})
-                if ce or pe:
-                    parsed.append({
-                        "Strike": strike,
-                        "Call_OI": ce.get('openInterest', 0),
-                        "Call_Chng_OI": ce.get('changeinOpenInterest', 0),
-                        "Put_OI": pe.get('openInterest', 0),
-                        "Put_Chng_OI": pe.get('changeinOpenInterest', 0)
-                    })
-            return pd.DataFrame(parsed)
-    except Exception:
-        pass
-    return pd.DataFrame()
+    div[data-testid="stCheckbox"] label {
+        font-size: 1.25rem !important;
+        font-weight: 700 !important;
+        color: #1E3A8A !important;
+        cursor: pointer !important;
+    }
+    div[data-testid="stCheckbox"] input[type="checkbox"] {
+        transform: scale(1.3) !important;
+        margin-right: 10px !important;
+        cursor: pointer !important;
+    }
+    .receipt-box {
+        border: 2px dashed #1E3A8A;
+        border-radius: 10px;
+        padding: 18px;
+        background-color: #F0FDF4;
+        margin-top: 15px;
+    }
+    </style>
+"""
+st.markdown(clean_ui_css, unsafe_allow_html=True)
 
-# --- STATE MANAGEMENT ---
-def get_persisted_active_trade():
-    if os.path.exists(ACTIVE_TRADE_FILE):
-        try:
-            with open(ACTIVE_TRADE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
+# 🔒 CONFIDENTIAL PINS
+OVERSEER_PIN = "1 Peter 5:2"
+ADMIN_PIN = "2027"
 
-def set_persisted_active_trade(trade_dict):
-    if trade_dict is None:
-        if os.path.exists(ACTIVE_TRADE_FILE):
-            os.remove(ACTIVE_TRADE_FILE)
-    else:
-        with open(ACTIVE_TRADE_FILE, "w") as f:
-            json.dump(trade_dict, f, indent=4)
+# 📁 LOCAL BACKUP FILE
+LOCAL_BACKUP = "service_reports_db.xlsx"
 
-def load_trade_history():
-    if os.path.exists(CSV_FILE):
-        try:
-            df = pd.read_csv(CSV_FILE)
-            if not df.empty and 'Total_PnL_INR' in df.columns:
-                df['Total_PnL_INR'] = pd.to_numeric(df['Total_PnL_INR'], errors='coerce').fillna(0.0)
-            return df
-        except Exception:
-            return pd.DataFrame()
-    return pd.DataFrame()
+REGULAR_PIONEERS = [
+    "Paul, Austin",
+    "Paul, Pragati",
+    "Khandare, Janki",
+    "Khandare, Ishita",
+    "Tirkey, Libnus",
+    "Lalita, Merlin",
+    "XaXa, Fabiola",
+    "Susai Paul, Benita",
+    "Kindo, Hilariyas",
+]
 
-def save_trade_to_csv(trade_dict):
-    df_new = pd.DataFrame([trade_dict])
-    if not os.path.exists(CSV_FILE):
-        df_new.to_csv(CSV_FILE, index=False)
-    else:
-        df_new.to_csv(CSV_FILE, mode='a', header=False, index=False)
-
-def clear_all_records():
-    if os.path.exists(CSV_FILE):
-        os.remove(CSV_FILE)
-    if os.path.exists(ACTIVE_TRADE_FILE):
-        os.remove(ACTIVE_TRADE_FILE)
-    if os.path.exists(TV_SIGNAL_FILE):
-        os.remove(TV_SIGNAL_FILE)
-
-def send_telegram_alert(token, chat_id, message_text):
-    if token and chat_id:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message_text, "parse_mode": "Markdown"}
-        try:
-            requests.post(url, json=payload, timeout=5)
-        except Exception:
-            pass
-
-@st.cache_resource(ttl=3600)
-def get_angel_session():
-    try:
-        totp = pyotp.TOTP(TOTP_SECRET).now()
-        smart_api = SmartConnect(api_key=API_KEY)
-        data = smart_api.generateSession(CLIENT_CODE, PIN, totp)
-        if data.get('status'):
-            return smart_api, data['data'].get('name', 'OSTEN')
-        return None, None
-    except Exception:
-        return None, None
-
-def get_market_data(smart_api, cfg, interval="5m", period="5d"):
-    try:
-        angel_int_map = {"5m": "FIVE_MINUTE", "15m": "FIFTEEN_MINUTE", "1h": "ONE_HOUR"}
-        to_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        from_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
-        params = {
-            "exchange": cfg["exchange"],
-            "symboltoken": str(cfg["token"]),
-            "interval": angel_int_map.get(interval, "FIVE_MINUTE"),
-            "fromdate": from_date,
-            "todate": to_date
-        }
-        res = smart_api.getCandleData(params) if smart_api else {}
-        if res.get('status') and res.get('data'):
-            df = pd.DataFrame(res['data'], columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-            df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-            df.set_index('Timestamp', inplace=True)
-            return df
-    except Exception:
-        pass
-
-    try:
-        df_yf = yf.download(cfg["yf_symbol"], period=period, interval=interval, progress=False)
-        if not df_yf.empty:
-            if isinstance(df_yf.columns, pd.MultiIndex):
-                df_yf.columns = df_yf.columns.get_level_values(0)
-            df_yf = df_yf[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-            for col in df_yf.columns:
-                df_yf[col] = pd.to_numeric(df_yf[col], errors='coerce')
-            return df_yf.dropna()
-    except Exception:
-        pass
-    return pd.DataFrame()
-
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("⚙️ Market Controls")
-asset_config = {
-    "NIFTY 50": {"yf_symbol": "^NSEI", "token": "99926000", "exchange": "NSE", "step": 50, "multiplier": 75, "cost_shift": 15.0, "trail_step": 25.0, "nse_sym": "NIFTY"},
-    "BANK NIFTY": {"yf_symbol": "^NSEBANK", "token": "99926009", "exchange": "NSE", "step": 100, "multiplier": 25, "cost_shift": 30.0, "trail_step": 50.0, "nse_sym": "BANKNIFTY"},
-    "SENSEX": {"yf_symbol": "^BSESN", "token": "99919000", "exchange": "BSE", "step": 100, "multiplier": 20, "cost_shift": 40.0, "trail_step": 70.0, "nse_sym": None},
-    "CRUDE OIL": {"yf_symbol": "CL=F", "token": "253460", "exchange": "MCX", "step": 50, "multiplier": 100, "cost_shift": 12.0, "trail_step": 20.0, "nse_sym": None}
+# 📋 ROSTER WITH SISTER NATASHA MOHAN ADDED
+ROSTER_DATA = {
+    "Kingdom Hall (किंगडम हॉल)": [
+        "Paul, Austin",
+        "Paul, Pragati",
+        "Borasi, Kiran",
+        "Buddha, Lata",
+        "Chuhan, Sushmita",
+        "Khandare, Ishita",
+        "Khandare, Janki",
+        "Khakha, Anoop",
+        "Mohan, Natasha",
+        "Patel, Rosemary",
+        "Peter, Vinod",
+        "Peter, Sunita",
+        "Raidas, Puran",
+        "Raidas, Dasoda",
+        "Soloman, Sawan",
+        "Swami, Ajit",
+        "Swami, Jennifer",
+        "Swami, Steven",
+        "Tirkey, Libnus",
+        "Tirkey, Nirmala",
+        "Tirkey, Mitchell",
+        "Tirkey, Moses",
+        "Topo, Ashrita",
+    ],
+    "Pushp Nagar (पुष्प नगर)": [
+        "Oru, Deepak",
+        "Oru, Seema",
+        "Bharonda, Yash",
+        "Gomes, Anju",
+        "Hsieh, Josephine",
+        "Khakha, Silvanus",
+        "XaXa, Fabiola",
+        "Lalita, Merlin",
+        "Lartius, Issac",
+        "Maida, Anugrah",
+        "Maida, Vikrant",
+        "Oru, Augustin",
+        "Oru, Magdalene",
+        "Oru, Neha",
+        "Paul, Regina",
+        "Susai Paul, Alwin",
+        "Susai Paul, Benita",
+        "Swami, Alpana",
+        "Swami, Joel",
+        "Topno, Diana",
+        "Topno, Sara",
+        "Vincent, Neil",
+        "Vincent, Sapan",
+        "Vinod, Vandita",
+    ],
+    "Scheme 78 (स्कीम 78)": [
+        "Oru, Dheeraj",
+        "Oru, Angelina",
+        "Barnabas, Rajni",
+        "Barnabas, Harshil",
+        "Joel, John",
+        "Kindo, Hilariyas",
+        "Kindo, Sunita",
+        "Kindo, Abhishek",
+        "Lartius, Kenneth",
+        "Lartius, Edrina",
+        "Lartius, Neil",
+        "Nunes, Emmanuel",
+        "Ojha, Kusum",
+        "Peter, Jerald",
+        "Peter, Kiran",
+        "Peter, Andrea",
+        "Swami, Joshi",
+        "Swami, Neeta",
+        "Swami, Sharin",
+        "Tiwari, Eva",
+        "Yadav, Tanu",
+    ],
 }
 
-selected_asset = st.sidebar.selectbox("Asset", list(asset_config.keys()), index=0)
-cfg = asset_config[selected_asset]
-product_type = st.sidebar.selectbox("Product Order Type", ["CARRYFORWARD (NRML)", "INTRADAY (MIS)"], index=0)
+MONTHS_BILINGUAL = [
+    "August (अगस्त)",
+    "September (सितंबर)",
+    "October (अक्टूबर)",
+    "November (नवंबर)",
+    "December (दिसंबर)",
+    "January (जनवरी)",
+    "February (फ़रवरी)",
+    "March (मार्च)",
+    "April (अप्रैल)",
+    "May (मई)",
+    "June (जून)",
+    "July (जुलाई)",
+]
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("🛡️ Risk Parameters")
-account_capital = st.sidebar.number_input("Capital (₹)", min_value=10000.0, max_value=5000000.0, value=100000.0, step=10000.0)
-risk_pct = st.sidebar.slider("Risk Per Trade (%)", 0.5, 5.0, 1.5, 0.25)
-daily_loss_limit = st.sidebar.number_input("Daily Circuit Limit (₹)", min_value=1000.0, max_value=50000.0, value=3000.0, step=500.0)
-sl_points_input = st.sidebar.number_input("Spot Stop Loss (Pts)", min_value=10.0, max_value=150.0, value=30.0, step=5.0)
+REQUIRED_COLS = [
+    "Group",
+    "Publisher",
+    "Month",
+    "Role",
+    "Participated",
+    "Hours",
+    "Bible Studies",
+    "Comments",
+    "Submitted At",
+]
 
-# Dynamic Position Sizing
-risk_inr = account_capital * (risk_pct / 100.0)
-risk_per_lot = sl_points_input * 0.55 * cfg["multiplier"]
-calculated_lots = max(1, int(risk_inr // risk_per_lot))
-st.sidebar.info(f"📐 **Auto Sizing:** **{calculated_lots} Lot(s)** (₹{risk_inr:.0f} Risk)")
+current_m_idx = 0
+cur_month_str = datetime.now().strftime("%B")
+for idx, m_name in enumerate(MONTHS_BILINGUAL):
+  if cur_month_str in m_name:
+    current_m_idx = idx
+    break
 
-st.sidebar.markdown("---")
-auto_trade_enabled = st.sidebar.toggle("⚡ Auto-Pilot Active", value=True)
-trade_mode = st.sidebar.radio("Execution Target", ["📝 Paper Trading (Virtual)", "⚡ Live Demat (Angel One)"], index=0)
-auto_refresh = st.sidebar.checkbox("Auto-Refresh Loop", value=True)
-refresh_interval = st.sidebar.slider("Interval (sec)", 3, 30, 5, 1)
 
-if st.sidebar.button("🛑 Force Close Active Trade"):
-    set_persisted_active_trade(None)
-    st.sidebar.success("Active trade cleared!")
-    st.rerun()
+# ☁️ GOOGLE SHEETS DUAL-SYNC ENGINE
+def get_connection():
+  try:
+    return st.connection("gsheets", type=GSheetsConnection)
+  except Exception:
+    return None
 
-if st.sidebar.button("🗑️ Reset All Records"):
-    clear_all_records()
-    st.sidebar.success("All data cleared!")
-    st.rerun()
 
-smart_api_client, user_name = get_angel_session()
-
-# Check Daily Circuit
-df_hist_check = load_trade_history()
-today_str = datetime.now().strftime("%Y-%m-%d")
-daily_pnl = 0.0
-if not df_hist_check.empty and 'Date' in df_hist_check.columns and 'Total_PnL_INR' in df_hist_check.columns:
-    df_today_trades = df_hist_check[df_hist_check['Date'] == today_str]
-    daily_pnl = float(df_today_trades['Total_PnL_INR'].sum())
-
-circuit_broken = daily_pnl <= -abs(daily_loss_limit)
-
-st.title("🎯 Tri-Engine Algo Terminal (WebSocket + Webhook + Option Chain)")
-
-if circuit_broken:
-    st.error(f"🛑 **CIRCUIT BREAKER HIT:** Daily Loss: ₹{daily_pnl:.2f}. Auto-Trading Locked for the day.")
-    auto_trade_enabled = False
-
-def val(s):
-    if hasattr(s, 'values'):
-        return float(s.values[0])
-    return float(s)
-
-# Load Market Data
-data_5m = get_market_data(smart_api_client, cfg, interval="5m", period="5d")
-data_15m = get_market_data(smart_api_client, cfg, interval="15m", period="5d")
-
-if not data_5m.empty and len(data_5m) > 15:
-    data_5m['EMA_9'] = data_5m['Close'].ewm(span=9, adjust=False).mean()
-    data_5m['EMA_21'] = data_5m['Close'].ewm(span=21, adjust=False).mean()
-    data_5m['Vol_SMA'] = data_5m['Volume'].rolling(20).mean()
-
+def load_data():
+  conn = get_connection()
+  if conn:
     try:
-        df_today = data_5m[data_5m.index.date == data_5m.index[-1].date()].copy()
-        vol_sum = float(np.nansum(df_today['Volume'].values))
-        if not df_today.empty and vol_sum > 0:
-            tp = (df_today['High'] + df_today['Low'] + df_today['Close']) / 3
-            data_5m.loc[df_today.index, 'VWAP'] = (tp * df_today['Volume']).cumsum() / df_today['Volume'].cumsum()
-        else:
-            data_5m['VWAP'] = data_5m['EMA_21']
+      df = conn.read(worksheet="Master_Database", ttl=5)
+      if df is not None and not df.empty:
+        for col in REQUIRED_COLS:
+          if col not in df.columns:
+            df[col] = ""
+        return df[REQUIRED_COLS]
     except Exception:
-        data_5m['VWAP'] = data_5m['EMA_21']
+      pass
 
-    delta = data_5m['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    data_5m['RSI'] = 100 - (100 / (1 + rs))
-
-    curr_c = val(data_5m['Close'].iloc[-1])
-    prev_c = val(data_5m['Close'].iloc[-2]) if len(data_5m) > 1 else curr_c
-    curr_o = val(data_5m['Open'].iloc[-1])
-    curr_h = val(data_5m['High'].iloc[-1])
-    curr_l = val(data_5m['Low'].iloc[-1])
-    curr_vol = val(data_5m['Volume'].iloc[-1])
-    avg_vol = val(data_5m['Vol_SMA'].iloc[-1]) if not np.isnan(val(data_5m['Vol_SMA'].iloc[-1])) else curr_vol
-
-    e9_5m = val(data_5m['EMA_9'].iloc[-1])
-    e21_5m = val(data_5m['EMA_21'].iloc[-1])
-    vwap_val = val(data_5m['VWAP'].iloc[-1]) if not np.isnan(val(data_5m['VWAP'].iloc[-1])) else e21_5m
-    rsi_5m = val(data_5m['RSI'].iloc[-1]) if not np.isnan(val(data_5m['RSI'].iloc[-1])) else 50.0
-
-    step = cfg["step"]
-    atm_strike = round(curr_c / step) * step
-    call_strike = int(atm_strike - step)
-    put_strike = int(atm_strike + step)
-    est_call_ltp = round(max((curr_c - call_strike) + 85, 45.0), 1)
-    est_put_ltp = round(max((put_strike - curr_c) + 85, 45.0), 1)
-
-    # 1. Indicator Confluence Signal
-    bull_confluence = (curr_c >= vwap_val) and (e9_5m >= e21_5m) and (curr_c >= e9_5m or (curr_l <= e21_5m and curr_c > e21_5m)) and (48 <= rsi_5m <= 85)
-    bear_confluence = (curr_c <= vwap_val) and (e9_5m <= e21_5m) and (curr_c <= e9_5m or (curr_h >= e21_5m and curr_c < e21_5m)) and (12 <= rsi_5m <= 52)
-
-    # 2. TradingView External Webhook Check
-    tv_data = get_latest_tv_signal()
-    tv_signal = tv_data.get("signal", "") if tv_data else ""
-
-    action = "WAIT"
-    suggested_strike = ""
-    active_opt_ltp = 0.0
-    initial_sl = 0.0
-
-    if bull_confluence or tv_signal == "BUY_CALL":
-        action = "BUY_CALL"
-        suggested_strike = f"{call_strike} CE (ITM)"
-        active_opt_ltp = est_call_ltp
-        initial_sl = curr_c - sl_points_input
-    elif bear_confluence or tv_signal == "BUY_PUT":
-        action = "BUY_PUT"
-        suggested_strike = f"{put_strike} PE (ITM)"
-        active_opt_ltp = est_put_ltp
-        initial_sl = curr_c + sl_points_input
-
-    persisted_trade = get_persisted_active_trade()
-    if persisted_trade is not None and persisted_trade.get("Asset") != selected_asset:
-        persisted_trade = None
-        set_persisted_active_trade(None)
-
-    # Trade Execution
-    if auto_trade_enabled and not circuit_broken and persisted_trade is None and action in ["BUY_CALL", "BUY_PUT"]:
-        total_qty = calculated_lots * cfg["multiplier"]
-        new_trade_data = {
-            "Entry_Date": datetime.now().strftime("%Y-%m-%d"),
-            "Entry_Time": datetime.now().strftime("%H:%M:%S"),
-            "Asset": selected_asset,
-            "Exchange": cfg["exchange"],
-            "Type": action,
-            "Strike": suggested_strike,
-            "Entry_Spot": curr_c,
-            "Option_Entry_LTP": active_opt_ltp,
-            "Initial_SL": initial_sl,
-            "Trailing_SL": initial_sl,
-            "Peak_Price": curr_c,
-            "Cost_Shifted": False,
-            "Qty": total_qty,
-            "Lots": calculated_lots,
-            "Product": product_type,
-            "Mode": trade_mode,
-            "Cost_Shift_Pts": cfg["cost_shift"],
-            "Trail_Step_Pts": cfg["trail_step"]
-        }
-        set_persisted_active_trade(new_trade_data)
-        persisted_trade = new_trade_data
-        send_telegram_alert(
-            BOT_TOKEN, CHAT_ID,
-            f"⚡ *HYBRID ORDER*\n\n📌 *Asset:* `{selected_asset}`\n🎯 *Signal:* `{action}` (TV: {tv_signal if tv_signal else 'Hybrid'})\n🏷 *Strike:* `{suggested_strike}` (LTP: ₹{active_opt_ltp})\n📦 *Lots:* {calculated_lots}\n💰 *Spot:* ₹{curr_c:.2f}\n🛑 *SL:* ₹{initial_sl:.2f}"
-        )
-        if tv_signal:
-            set_latest_tv_signal = None
-            if os.path.exists(TV_SIGNAL_FILE):
-                os.remove(TV_SIGNAL_FILE)
-
-    # Top Confluence Row
-    w1, w2, w3, w4 = st.columns(4)
-    w1.metric("Live Spot", f"₹{curr_c:.2f}", f"{((curr_c - prev_c)/prev_c)*100:.2f}%")
-    w2.metric("ITM Call LTP", f"₹{est_call_ltp:.1f}", f"Strike: {call_strike} CE")
-    w3.metric("ITM Put LTP", f"₹{est_put_ltp:.1f}", f"Strike: {put_strike} PE")
-    tv_status = f"⚡ {tv_signal}" if tv_signal else "🟢 Listening (:5001)"
-    w4.metric("TradingView Webhook", tv_status)
-
-    # --- NSE OPTION CHAIN OI TRAP RADAR ---
-    st.write("---")
-    st.write("### 📊 NSE Live Option Chain & Open Interest Trap")
-    if cfg.get("nse_sym"):
-        df_oc = fetch_nse_option_chain(cfg["nse_sym"])
-        if not df_oc.empty:
-            df_oc_filtered = df_oc[(df_oc['Strike'] >= atm_strike - (step*4)) & (df_oc['Strike'] <= atm_strike + (step*4))].copy()
-            total_call_oi = df_oc_filtered['Call_OI'].sum()
-            total_put_oi = df_oc_filtered['Put_OI'].sum()
-            oi_pcr = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 1.0
-
-            oc_col1, oc_col2, oc_col3 = st.columns(3)
-            oc_col1.metric("Option Chain PCR", f"{oi_pcr:.2f}", "Bullish Floor" if oi_pcr >= 1.15 else ("Bearish Wall" if oi_pcr <= 0.85 else "Neutral"))
-            oc_col2.metric("Total Put Writing (Support)", f"{int(total_put_oi):,}")
-            oc_col3.metric("Total Call Writing (Resistance)", f"{int(total_call_oi):,}")
-
-            st.dataframe(df_oc_filtered[['Strike', 'Call_OI', 'Call_Chng_OI', 'Put_OI', 'Put_Chng_OI']], use_container_width=True)
-        else:
-            st.info("ℹ️ NSE Option Chain API connects directly during live market hours.")
-    else:
-        st.info(f"ℹ️ Option Chain OI Tracker is active for NIFTY & BANK NIFTY.")
-
-    # --- LIVE POSITION TERMINAL ---
-    st.write("---")
-    st.write("### 💼 Live Position Terminal")
-    if persisted_trade is not None:
-        t = persisted_trade
-        entry = t["Entry_Spot"]
-        opt_entry = t.get("Option_Entry_LTP", 100.0)
-        qty = t["Qty"]
-        shift_target = t.get("Cost_Shift_Pts", 15.0)
-        trail_target = t.get("Trail_Step_Pts", 25.0)
-        is_closed = False
-        exit_reason = ""
-
-        if t["Type"] == "BUY_CALL":
-            pts_diff = curr_c - entry
-            if curr_c > t["Peak_Price"]:
-                t["Peak_Price"] = curr_c
-            if pts_diff >= shift_target and not t["Cost_Shifted"]:
-                t["Trailing_SL"] = entry + 1.0
-                t["Cost_Shifted"] = True
-                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
-            if pts_diff >= trail_target:
-                new_trail = curr_c - shift_target
-                if new_trail > t["Trailing_SL"]:
-                    t["Trailing_SL"] = new_trail
-            if curr_c <= t["Trailing_SL"]:
-                is_closed = True
-                exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
-        else:
-            pts_diff = entry - curr_c
-            if curr_c < t["Peak_Price"]:
-                t["Peak_Price"] = curr_c
-            if pts_diff >= shift_target and not t["Cost_Shifted"]:
-                t["Trailing_SL"] = entry - 1.0
-                t["Cost_Shifted"] = True
-                send_telegram_alert(BOT_TOKEN, CHAT_ID, f"🛡️ *BREAK-EVEN LOCKED:* SL moved to Cost (₹{entry:.2f}) for `{t['Asset']}`.")
-            if pts_diff >= trail_target:
-                new_trail = curr_c + shift_target
-                if new_trail < t["Trailing_SL"]:
-                    t["Trailing_SL"] = new_trail
-            if curr_c >= t["Trailing_SL"]:
-                is_closed = True
-                exit_reason = "COST / TRAIL EXIT 🛑" if t["Cost_Shifted"] else "HARD SL HIT 🛑"
-
-        opt_points = round(pts_diff * 0.55, 2)
-        curr_opt_ltp = round(max(opt_entry + opt_points, 1.0), 1)
-        trade_pnl = round(opt_points * qty, 2)
-
-        if not is_closed:
-            set_persisted_active_trade(t)
-
-        pos1, pos2, pos3, pos4 = st.columns(4)
-        pos1.metric("Position Instrument", f"{t['Strike']}", f"Lots: {t.get('Lots', 1)}")
-        pos2.metric("Option LTP", f"₹{curr_opt_ltp:.1f}", f"Entry: ₹{opt_entry:.1f}")
-        pos3.metric("Spot Move", f"{pts_diff:+.2f} pts", f"Entry: ₹{entry:.2f}")
-        pos4.metric("Live Net P&L (₹)", f"₹{trade_pnl:+.2f}", delta=f"{trade_pnl:.2f}")
-
-        st.info(f"🛡️ **Trailing SL:** ₹{t['Trailing_SL']:.2f} | Status: {'Zero Risk Cost Locked 🔒' if t['Cost_Shifted'] else 'Initial SL Active ⏳'}")
-
-        if is_closed:
-            completed_trade = {
-                "Date": t["Entry_Date"],
-                "Entry_Time": t["Entry_Time"],
-                "Exit_Time": datetime.now().strftime("%H:%M:%S"),
-                "Asset": t["Asset"],
-                "Exchange": t.get("Exchange", "NSE"),
-                "Type": t["Type"],
-                "Strike": t["Strike"],
-                "Entry_Spot": t["Entry_Spot"],
-                "Exit_Spot": curr_c,
-                "Opt_Entry": opt_entry,
-                "Opt_Exit": curr_opt_ltp,
-                "Spot_Points": round(pts_diff, 2),
-                "Total_PnL_INR": trade_pnl,
-                "Exit_Reason": exit_reason,
-                "Mode": t["Mode"]
-            }
-            save_trade_to_csv(completed_trade)
-            set_persisted_active_trade(None)
-            send_telegram_alert(
-                BOT_TOKEN, CHAT_ID,
-                f"🏁 *TRADE CLOSED*\n\n📌 *Asset:* `{t['Asset']}`\n🏷 *Strike:* `{t['Strike']}`\n💰 *P&L:* ₹{trade_pnl:+.2f}\n🚪 *Reason:* `{exit_reason}`"
-            )
-            st.rerun()
-    else:
-        st.info("🟢 **इंजन सक्रिय है:** हाइब्रिड कन्फ्लुएंस या TradingView Webhook सिग्नल मिलते ही ट्रेड एग्जीक्यूट होगा।")
-
-    # Candlestick Chart
-    st.write("### 📈 Live Multi-Overlay Candlestick Chart")
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Candlestick(
-        x=data_5m.index,
-        open=data_5m['Open'].values.flatten() if hasattr(data_5m['Open'], 'values') else data_5m['Open'],
-        high=data_5m['High'].values.flatten() if hasattr(data_5m['High'], 'values') else data_5m['High'],
-        low=data_5m['Low'].values.flatten() if hasattr(data_5m['Low'], 'values') else data_5m['Low'],
-        close=data_5m['Close'].values.flatten() if hasattr(data_5m['Close'], 'values') else data_5m['Close'],
-        name="Price"
-    ), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['VWAP'].values.flatten() if hasattr(data_5m['VWAP'], 'values') else data_5m['VWAP'], line=dict(color='yellow', width=2), name="VWAP"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_9'].values.flatten() if hasattr(data_5m['EMA_9'], 'values') else data_5m['EMA_9'], line=dict(color='lime', width=1.5), name="9 EMA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['EMA_21'].values.flatten() if hasattr(data_5m['EMA_21'], 'values') else data_5m['EMA_21'], line=dict(color='orange', width=1.5), name="21 EMA"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=data_5m.index, y=data_5m['RSI'].values.flatten() if hasattr(data_5m['RSI'], 'values') else data_5m['RSI'], line=dict(color='magenta', width=1.5), name="RSI"), row=2, col=1)
-    fig.update_layout(height=480, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=20, r=20, t=20, b=20))
-    st.plotly_chart(fig, use_container_width=True)
-
-# Completed Trade History
-st.write("---")
-st.write("### 📚 Completed Trade Book & Historical Performance")
-df_history = load_trade_history()
-if not df_history.empty:
-    col_j1, col_j2, col_j3 = st.columns(3)
-    total_pnl_all = float(df_history['Total_PnL_INR'].sum())
-    total_trades = len(df_history)
-    winning_trades = len(df_history[df_history['Total_PnL_INR'] > 0])
-    win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
-
-    col_j1.metric("Cumulative Net P&L", f"₹{total_pnl_all:+.2f}", delta=f"{total_pnl_all:.2f}")
-    col_j2.metric("Total Trades Executed", f"{total_trades}")
-    col_j3.metric("Win Rate", f"{win_rate:.1f}%", f"{winning_trades} Wins")
-
-    st.dataframe(df_history, use_container_width=True)
-    csv_data = df_history.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download Complete Trade History (CSV)",
-        data=csv_data,
-        file_name=f"trade_book_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv",
-    )
-else:
-    st.info("ℹ️ पहला ट्रेड क्लोज होते ही पूरी हिस्ट्री और डाउनलोड बटन यहाँ दिखेगा।")
-
-if auto_refresh:
-    time.sleep(refresh_interval)
-    st.rerun()
-    import pandas as pd
-import ta
-from datetime import datetime, timedelta
-
-def get_nifty_signal(smart_api):
-    to_date = datetime.now().strftime('%Y-%m-%d %H:%M')
-    from_date = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d 09:15')
-
-    params = {
-        "exchange": "NSE",
-        "symboltoken": "99926000",
-        "interval": "FIVE_MINUTE",
-        "fromdate": from_date,
-        "todate": to_date
-    }
+  # Fallback to local
+  if os.path.exists(LOCAL_BACKUP):
     try:
-        response = smart_api.getCandleData(params)
-        if not response or response.get('data') is None:
-            return None, 0
-            
-        candles = response['data']
-        df = pd.DataFrame(candles, columns=['datetime', 'open', 'high', 'low', 'close', 'volume'])
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        
-        df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
-        df['ema20'] = ta.trend.EMAIndicator(close=df['close'], window=20).ema_indicator()
-        
-        df['pivot_low'] = df['low'] == df['low'].rolling(window=11, center=True).min()
-        df['pivot_high'] = df['high'] == df['high'].rolling(window=11, center=True).max()
-        
-        latest_close = df['close'].iloc[-1]
-        latest_ema = df['ema20'].iloc[-1]
-        
-        low_pivots = df[df['pivot_low']].tail(2)
-        if len(low_pivots) == 2:
-            prev_p = low_pivots.iloc[0]
-            curr_p = low_pivots.iloc[1]
-            if curr_p['low'] < prev_p['low'] and curr_p['rsi'] > prev_p['rsi']:
-                if latest_close > latest_ema:
-                    return "BUY_CALL", latest_close
+      df = pd.read_excel(LOCAL_BACKUP)
+      for col in REQUIRED_COLS:
+        if col not in df.columns:
+          df[col] = ""
+      return df[REQUIRED_COLS]
+    except Exception:
+      pass
 
-        high_pivots = df[df['pivot_high']].tail(2)
-        if len(high_pivots) == 2:
-            prev_p = high_pivots.iloc[0]
-            curr_p = high_pivots.iloc[1]
-            if curr_p['high'] > prev_p['high'] and curr_p['rsi'] < prev_p['rsi']:
-                if latest_close < latest_ema:
-                    return "BUY_PUT", latest_close
-                    
-        return None, latest_close
-    except Exception as e:
-        print(f"Strategy Error: {e}")
-        return None, 0
+  return pd.DataFrame(columns=REQUIRED_COLS)
+
+
+def save_data(df):
+  for col in REQUIRED_COLS:
+    if col not in df.columns:
+      df[col] = ""
+  df = df[REQUIRED_COLS]
+
+  # 1. Local backup save
+  try:
+    df.to_excel(LOCAL_BACKUP, index=False)
+  except Exception:
+    pass
+
+  # 2. Cloud Google Sheet live save
+  conn = get_connection()
+  if conn:
+    try:
+      conn.update(worksheet="Master_Database", data=df)
+    except Exception:
+      pass
+
+
+st.title("📖 इंदौर ईस्ट मंडली - क्षेत्र सेवा पोर्टल")
+st.caption("Indore East Congregation - Field Service Report Portal")
+st.markdown("---")
+
+menu = st.sidebar.selectbox("मेन्यू / Menu Navigation", [
+    "📝 रिपोर्ट जमा करें (Submit Report)",
+    "📊 ग्रुप रिपोर्ट देखें (Overseers Only 🔒)",
+    "🌟 रेगुलर पायनियर (Pioneers Special 🔒)",
+    "⚙️ एडमिन एवं एक्सेल डाउनलोड (Admin & Export 🔒)",
+])
+
+# 1. PUBLISHERS & PIONEERS FORM
+if menu == "📝 रिपोर्ट जमा करें (Submit Report)":
+  st.header("📝 मासिक क्षेत्र सेवा रिपोर्ट / Monthly Report")
+
+  col1, col2 = st.columns(2)
+  with col1:
+    selected_group = st.selectbox(
+        "अपना ग्रुप चुनें / Select Group", list(ROSTER_DATA.keys())
+    )
+  with col2:
+    selected_publisher = st.selectbox(
+        "अपना नाम चुनें / Select Name", ROSTER_DATA[selected_group]
+    )
+
+  selected_month = st.selectbox(
+      "महीना चुनें / Select Month", MONTHS_BILINGUAL, index=current_m_idx
+  )
+
+  is_regular_pioneer = selected_publisher in REGULAR_PIONEERS
+
+  is_auxiliary = False
+  if not is_regular_pioneer:
+    is_auxiliary = st.checkbox(
+        "🎗️ क्या आपने इस महीने सहायक पायनियर सेवा की? (Auxiliary Pioneer)",
+        value=False,
+    )
+  else:
+    st.info("🌟 आप रेगुलर पायनियर के रूप में दर्ज हैं (Regular Pioneer).")
+
+  with st.form("report_form"):
+    submitted_check = st.checkbox(
+        "✔ क्या आपने इस महीने प्रचार सेवा में भाग लिया? (Participated in"
+        " Ministry)",
+        value=False,
+    )
+    st.markdown("---")
+
+    hours = 0
+    if is_regular_pioneer or is_auxiliary:
+      hours = st.number_input(
+          "प्रचार के कुल घंटे (Hours):",
+          min_value=0,
+          max_value=200,
+          value=0,
+          help="केवल पायनियरों के लिए",
+      )
+
+    bible_studies = st.number_input(
+        "बाइबल अध्ययनों की संख्या (Bible Studies / B.S.):",
+        min_value=0,
+        max_value=30,
+        value=0,
+    )
+    comments = st.text_area(
+        "टिप्पणी / Remarks (बीमारी, विशेष परिस्थिति, या कोई अन्य जानकारी):"
+    )
+
+    submit_btn = st.form_submit_button("रिपोर्ट सबमिट करें (Submit Report)")
+
+    if submit_btn:
+      if not submitted_check and hours == 0 and bible_studies == 0:
+        st.warning(
+            "⚠️ कृपया पुष्टि करें कि आपने प्रचार में भाग लिया है या अपनी सही"
+            " जानकारी भरें।"
+        )
+      else:
+        role_label = (
+            "Regular Pioneer"
+            if is_regular_pioneer
+            else ("Auxiliary Pioneer" if is_auxiliary else "Publisher")
+        )
+        raw_month = selected_month.split(" (")[0]
+        submission_time = datetime.now().strftime("%d-%b-%Y %I:%M %p")
+
+        df = load_data()
+
+        already_exists = not df[
+            (df["Publisher"] == selected_publisher)
+            & (df["Month"] == raw_month)
+        ].empty
+
+        new_entry = {
+            "Group": selected_group.split(" (")[0],
+            "Publisher": selected_publisher,
+            "Month": raw_month,
+            "Role": role_label,
+            "Participated": "Yes" if submitted_check else "No",
+            "Hours": hours if (is_regular_pioneer or is_auxiliary) else "-",
+            "Bible Studies": bible_studies,
+            "Comments": comments,
+            "Submitted At": submission_time,
+        }
+
+        # Safe update
+        df = df[
+            ~(
+                (df["Publisher"] == selected_publisher)
+                & (df["Month"] == raw_month)
+            )
+        ]
+        df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+        save_data(df)
+
+        if already_exists:
+          st.info(
+              "🔄 आपकी पहले से मौजूद रिपोर्ट को नए विवरण के साथ अपडेट कर दिया"
+              " गया है।"
+          )
+        else:
+          st.success("🎉 आपकी रिपोर्ट सफलतापूर्वक दर्ज हो गई है! धन्यवाद।")
+
+        st.markdown(
+            f"""
+                <div class="receipt-box">
+                    <h4 style="margin:0; color:#1E3A8A;">🧾 रिपोर्ट रसीद / Confirmation Slip</h4>
+                    <hr style="margin:8px 0;">
+                    <b>प्रचारक का नाम (Name):</b> {selected_publisher}<br>
+                    <b>ग्रुप (Group):</b> {selected_group.split(" (")[0]}<br>
+                    <b>महीना (Month):</b> {selected_month}<br>
+                    <b>पद (Role):</b> {role_label}<br>
+                    <b>प्रचार में भाग लिया:</b> {'हाँ (Yes)' if submitted_check else 'नहीं (No)'}<br>
+                    <b>घंटे (Hours):</b> {hours if (is_regular_pioneer or is_auxiliary) else "N/A"}<br>
+                    <b>बाइबल अध्ययन (B.S.):</b> {bible_studies}<br>
+                    <b>दिनांक व समय:</b> {submission_time}
+                </div>
+                """,
+            unsafe_allow_html=True,
+        )
+
+# 2. OVERSEERS SECTION
+elif menu == "📊 ग्रुप रिपोर्ट देखें (Overseers Only 🔒)":
+  st.header("📊 ग्रुप रिपोर्ट स्थिति / Group Reports Status")
+  pin = st.text_input(
+      "ग्रुप ओवरसियर पिन दर्ज करें (Enter PIN):", type="password"
+  )
+
+  if pin == OVERSEER_PIN or pin == ADMIN_PIN:
+    st.success("पहुँच स्वीकृत ✔ (Access Granted)")
+
+    col_btn, _ = st.columns([1, 4])
+    with col_btn:
+      if st.button("🔄 डेटा रीफ्रेश करें (Refresh Live Data)"):
+        st.rerun()
+
+    view_group = st.selectbox(
+        "ग्रुप चुनें / Select Group", list(ROSTER_DATA.keys())
+    )
+    view_month = st.selectbox(
+        "महीना चुनें / Select Month", MONTHS_BILINGUAL, index=current_m_idx
+    )
+
+    raw_group = view_group.split(" (")[0]
+    raw_month = view_month.split(" (")[0]
+
+    df = load_data()
+    group_month_df = df[
+        (df["Group"] == raw_group) & (df["Month"] == raw_month)
+    ]
+
+    all_group_publishers = ROSTER_DATA.get(view_group, [])
+    submitted_publishers = (
+        group_month_df["Publisher"].tolist()
+        if not group_month_df.empty
+        else []
+    )
+    missing_publishers = [
+        pub for pub in all_group_publishers if pub not in submitted_publishers
+    ]
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("कुल प्रचारक (Total)", len(all_group_publishers))
+    col_m2.metric("रिपोर्ट प्राप्त हुई (Received)", len(submitted_publishers))
+    col_m3.metric("रिपोर्ट बाकी है (Pending)", len(missing_publishers))
+
+    st.markdown("---")
+    tab1, tab2 = st.tabs([
+        "✅ प्राप्त रिपोर्ट (Received Reports)",
+        "⏳ बाकी रिपोर्ट (Pending Reports)",
+    ])
+
+    with tab1:
+      if not group_month_df.empty:
+        total_bs = pd.to_numeric(
+            group_month_df["Bible Studies"], errors="coerce"
+        ).sum()
+        num_pioneers = group_month_df[
+            group_month_df["Role"].isin(
+                ["Regular Pioneer", "Auxiliary Pioneer"]
+            )
+        ].shape[0]
+
+        st.caption(
+            f"📈 **ग्रुप सारांश:** कुल बाइबल अध्ययन: **{int(total_bs)}** |"
+            f" पायनियर रिपोर्ट: **{num_pioneers}**"
+        )
+        st.dataframe(group_month_df, use_container_width=True)
+      else:
+        st.info(f"{view_month} के लिए इस ग्रुप से अभी कोई रिपोर्ट नहीं आई है।")
+
+    with tab2:
+      if missing_publishers:
+        st.warning(
+            f"⚠️ **{view_group}** के इन भाई-बहनों की **{view_month}** की रिपोर्ट"
+            " बाकी है:"
+        )
+        missing_df = pd.DataFrame(
+            {"प्रचारक का नाम (Pending Publisher)": missing_publishers}
+        )
+        st.dataframe(missing_df, use_container_width=True)
+
+        names_bullet = "\n".join([f"• {name}" for name in missing_publishers])
+        reminder_msg = (
+            "प्यारे भाईयों और बहनों, प्यार भरा नमस्कार। कृपया ध्यान दें कि"
+            f" *{view_month}* की क्षेत्र सेवा रिपोर्ट इन भाई-बहनों की आना बाकी"
+            f" है:\n\n{names_bullet}\n\nकृपया पोर्टल लिंक पर जाकर अपनी रिपोर्ट"
+            " जल्द सबमिट कर दें। धन्यवाद!"
+        )
+
+        encoded_msg = urllib.parse.quote(reminder_msg)
+        whatsapp_url = f"https://api.whatsapp.com/send?text={encoded_msg}"
+
+        st.markdown("---")
+        st.link_button(
+            "📲 व्हाट्सएप पर याद दिलाएं (Send Reminder on WhatsApp)",
+            whatsapp_url,
+        )
+        with st.expander(
+            "📝 मैसेज टेक्स्ट देखें या कॉपी करें (View / Copy Message)"
+        ):
+          st.text_area("Message Copy:", reminder_msg, height=180)
+      else:
+        st.success(
+            f"🎉 बधाई! {view_group} के सभी भाई-बहनों की रिपोर्ट"
+            f" **{view_month}** के लिए जमा हो चुकी है!"
+        )
+
+  elif pin:
+    st.error("अमान्य पिन! (Invalid PIN)")
+
+# 3. PIONEERS SECTION
+elif menu == "🌟 रेगुलर पायनियर (Pioneers Special 🔒)":
+  st.header("🌟 रेगुलर पायनियर सेवा रिकॉर्ड (Pioneers Special)")
+  pin = st.text_input("पायनियर ओवरसियर पिन दर्ज करें:", type="password")
+
+  if pin == OVERSEER_PIN or pin == ADMIN_PIN:
+    st.success("Access Granted ✔")
+    df = load_data()
+    pioneer_df = df[df["Publisher"].isin(REGULAR_PIONEERS)]
+    if not pioneer_df.empty:
+      st.dataframe(pioneer_df, use_container_width=True)
+    else:
+      st.info("पायनियरों का कोई रिकॉर्ड अभी उपलब्ध नहीं है।")
+  elif pin:
+    st.error("गलत पिन! (Invalid PIN)")
+
+# 4. ADMIN PANEL
+elif menu == "⚙️ एडमिन एवं एक्सेल डाउनलोड (Admin & Export 🔒)":
+  st.header("⚙️ मंडली सचिव मास्टर कंट्रोल (Secretary Master Control)")
+  pin = st.text_input("मास्टर एडमिन पिन दर्ज करें:", type="password")
+
+  if pin == ADMIN_PIN:
+    st.success("Admin Access Granted ✔")
+    df = load_data()
+    if not df.empty:
+      st.dataframe(df, use_container_width=True)
+      if os.path.exists(LOCAL_BACKUP):
+        with open(LOCAL_BACKUP, "rb") as f:
+          st.download_button(
+              label="📥 मास्टर रिपोर्ट एक्सेल शीट डाउनलोड करें (Download Excel)",
+              data=f,
+              file_name="Indore_East_Master_Field_Service_Report.xlsx",
+              mime=(
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              ),
+          )
+    else:
+      st.info("डेटाबेस अभी खाली है।")
+  elif pin:
+    st.error("गलत एडमिन पिन! (Invalid Admin PIN)")
+
