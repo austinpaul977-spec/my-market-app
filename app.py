@@ -3,7 +3,7 @@ import urllib.parse
 from datetime import datetime
 import pandas as pd
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+fr
 
 st.set_page_config(
     page_title="Indore East Congregation - Field Service Portal",
